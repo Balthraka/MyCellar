@@ -1,0 +1,9 @@
+{"drinks":[
+ {"id":"w01","type":"wine","name":"Made-up Red","producer":"Nobody","year":2019,"price":28.5,"wineColor":"red","rating":91,"tastingNotes":{"nose":"a","palate":"b","finish":"c"},
+  "stock":[{"id":"w01s1","location":"wine-fridge","sublocation":"Top Shelf","position":null,"quantity":2,"dateAdded":"2024-01-15","status":"in_stock","dateFinished":null},
+           {"id":"w01s2","location":"wine-rack","sublocation":"Row 1 (Top)","position":4,"quantity":1,"dateAdded":"2024-01-15","status":"finished","dateFinished":"2024-05-01"}]},
+ {"id":"k02","type":"whisky","name":"It's a Test Whisky","price":19.99,"whiskyStyle":"scotch","ageStatement":12,"stock":[]},
+ {"id":"k03","type":"whisky","name":"No Price","price":null,"stock":[{"id":"k03s1","location":"bar-cart","sublocation":"Top Shelf","position":null,"quantity":1,"dateAdded":"2024-02-02","status":"in_stock","dateFinished":null}]}
+],
+"locations":[{"id":"wine-fridge","name":"Wine Fridge","slots":["Top Shelf"],"positionsPerRow":null},{"id":"unassigned","name":"Unassigned","slots":["Needs Reassignment"],"positionsPerRow":null,"system":true}],
+"scale":[[80,"Good"],[90,"Great"]]}

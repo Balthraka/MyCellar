@@ -1,0 +1,19 @@
+{
+  "name": "mycellar-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test \"tests/*.test.js\"",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:local": "wrangler d1 execute mycellar --local --file=schema.sql",
+    "db:remote": "wrangler d1 execute mycellar --remote --file=schema.sql",
+    "backup": "wrangler d1 export mycellar --remote --output=mycellar-backup.sql",
+    "smoke": "node scripts/smoke-local.mjs"
+  },
+  "devDependencies": {
+    "miniflare": "^4.20260730.0",
+    "wrangler": "^4.0.0"
+  }
+}

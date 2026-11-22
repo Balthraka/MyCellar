@@ -1,0 +1,35 @@
+name = "mycellar-api"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+workers_dev = true
+preview_urls = false
+
+[vars]
+# Private mode: an email that is not already in `users` gets 403 not_invited.
+ALLOW_SIGNUPS = "false"
+# Exact origins only, comma separated. Never "*". No localhost: test on the deployed Worker with a throwaway public page (mycellar-beta).
+ALLOWED_ORIGINS = "https://YOUR-NAME.github.io"
+# Public identifiers (not secrets). Fill in after creating the Google client.
+GOOGLE_CLIENT_ID = ""
+# Microsoft is built but hidden while this is empty.
+MS_CLIENT_ID = ""
+# Session lifetime in days (core default is 30).
+SESSION_DAYS = "7"
+
+# "Look up details" (Workers AI, free daily allowance, no API key). Per-user limit per UTC day, and the model.
+LOOKUP_DAILY_LIMIT = "100"
+# Change the model here (no code change). The old llama-3.1-8b-instruct-fp8 was retired by Cloudflare on 2026-11-20.
+# Alternative: "@cf/qwen/qwen3.8-27b" (larger, uses more of the free AI allowance). The Worker reads both answer shapes (response / choices[0].message.content).
+LOOKUP_MODEL = "@cf/google/gemma-4-26b-a4b-it"
+
+[ai]
+binding = "AI"
+
+# Worker logs (errors and requests) in the Cloudflare dashboard, so a 500 leaves something to look at.
+[observability]
+enabled = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "mycellar"
+database_id = "REPLACE_WITH_ID_FROM_wrangler_d1_create"
