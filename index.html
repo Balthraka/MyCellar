@@ -7,11 +7,10 @@
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🍾</text></svg>" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
-  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
-  <!-- SUPABASE: uncomment when you fill in credentials below -->
-  <!-- <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script> -->
+  <script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js" integrity="sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js" integrity="sha384-gTGxhz21lVGYNMcdJOyq01Edg0jhn/c22nsx0kyqP0TxaV5WVdsSH1fSDUf5YJj1" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.29.15/babel.min.js" integrity="sha384-Ss/vAy5WJ/pgOuQj8fpWo8I/lIbCYJW0kNY8PbhsygEsxmwpdsXz47HC5+sIUypz" crossorigin="anonymous"></script>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { height: 100%; }
@@ -35,6 +34,7 @@
       .bot-nav     { display: flex; }
       .detail-panel { position: fixed; inset: 0; z-index: 200; width: 100%; border-left: none; overflow: auto; padding: 20px; }
       .det-close { display: none; } .det-back { display: block; }
+      input, textarea, select { font-size: 16px !important; }   /* below 16px an iPhone zooms in when a field is tapped */
     }
 
     ::-webkit-scrollbar { width: 5px; }
@@ -57,48 +57,88 @@
 <body>
   <div id="root"></div>
   <script type="text/babel">
-    const { useState, useEffect, useContext, createContext, useMemo } = React;
+    const { useState, useEffect, useContext, createContext, useMemo, useRef } = React;
 
     // ═══════════════════════════════════════════════════════════════════════
-    //  CONFIG — fill in to switch from localStorage to Supabase
+    //  CONFIG — public identifiers only. No secrets belong in this file.
     // ═══════════════════════════════════════════════════════════════════════
-    const SUPABASE_URL      = null;  // 'https://your-project.supabase.co'
-    const SUPABASE_ANON_KEY = null;  // 'eyJhbGciOiJIUzI1NiIsInR5cCI6...'
+    const API_BASE         = 'https://mycellar-api.balthraka.workers.dev';
+    const GOOGLE_CLIENT_ID = '572016421256-asv1jmr961rj0jgc8gb1p65h89jgov88.apps.googleusercontent.com';   // from Google Cloud; the sign-in button stays hidden until set
+    const MS_CLIENT_ID     = '';   // Microsoft button is hidden while this is empty
+    const SESSION_KEY      = 'mycellar-session-v1';   // unique per app: every app on github.io shares one origin
     // ═══════════════════════════════════════════════════════════════════════
 
-    // ─── Storage ──────────────────────────────────────────────────────────
-    // Data model: drinks[] where each drink has embedded stock[]
-    // One record per wine/whiskey. Stock entries track where bottles are.
-    const localStore = {
-      KEY: 'cellar-drinks-v4',
-      async load() { try { const r=localStorage.getItem(this.KEY); return r?JSON.parse(r):null; } catch { return null; } },
-      async upsert(d) { const all=await this.load()||[]; const i=all.findIndex(x=>x.id===d.id); i>=0?all[i]=d:all.push(d); localStorage.setItem(this.KEY,JSON.stringify(all)); },
-      async remove(id) { const all=await this.load()||[]; localStorage.setItem(this.KEY,JSON.stringify(all.filter(d=>d.id!==id))); },
-      // Batch upsert — single localStorage write for many drinks
-      async upsertMany(ds) { const all=await this.load()||[]; const map=new Map(all.map(x=>[x.id,x])); ds.forEach(d=>map.set(d.id,d)); localStorage.setItem(this.KEY,JSON.stringify([...map.values()])); },
-      async removeAll(ids) { localStorage.removeItem(this.KEY); },
+    // ─── API ──────────────────────────────────────────────────────────────
+    // The Worker's error bodies carry only a code ({error}); the page turns every code it can receive into a sentence.
+    const ERROR_TEXT = {
+      body_too_large: 'That is too much data to send at once. Try a smaller change.',
+      invalid: 'Some of that information is not valid, so it was not saved.',
+      invalid_json: 'Something went wrong sending that. Please try again.',
+      invalid_nonce: 'Sign-in could not be checked. Please try again.',
+      invalid_token: 'Sign-in could not be checked. Please try again.',
+      unauthorized: 'Your session has ended. Please sign in again.',
+      not_found: 'That item no longer exists.',
+      method_not_allowed: 'Something went wrong sending that. Please try again.',
+      conflict: 'This was changed on another device or tab.',
+      forbidden: 'You are not allowed to do that.',
+      not_invited: "That email address hasn't been invited to this cellar.",
+      email_not_verified: 'Google reports that email address as not verified.',
+      account_already_linked: 'That email is already linked to a different account.',
+      provider_not_configured: 'Sign-in is not available yet.',
+      origin_not_allowed: 'This page is not allowed to use the sign-in service.',
+      internal: 'The server had a problem. Please try again in a moment.',
+      lookup_limit: "You have used today's lookups. Try again tomorrow, or fill the details in yourself.",
+      lookup_unavailable: 'Look up is not available right now. You can fill the details in yourself.',
     };
-    function createSupabaseStore(url, key) {
-      if (!window.supabase) { console.error('Supabase JS not loaded.'); return localStore; }
-      const client = window.supabase.createClient(url, key); const T = 'cellar_drinks';
-      return {
-        async load() { const{data,error}=await client.from(T).select('data').order('created_at'); if(error){console.error(error);return null;} return data.map(r=>r.data); },
-        async upsert(d) { const{error}=await client.from(T).upsert({id:d.id,data:d}); if(error)console.error(error); },
-        async remove(id) { const{error}=await client.from(T).delete().eq('id',id); if(error)console.error(error); },
-        // Single API call for many drinks (free tier friendly)
-        async upsertMany(ds) { const{error}=await client.from(T).upsert(ds.map(d=>({id:d.id,data:d}))); if(error){console.error(error);throw error;} },
-        async removeAll(ids) { if(!ids.length) return; const{error}=await client.from(T).delete().in('id',ids); if(error){console.error(error);throw error;} },
-      };
+    class ApiError extends Error {
+      constructor(status, code, message) { super(ERROR_TEXT[code] || message || code); this.status = status; this.code = code; }
     }
-    const store        = (SUPABASE_URL&&SUPABASE_ANON_KEY) ? createSupabaseStore(SUPABASE_URL,SUPABASE_ANON_KEY) : localStore;
-    const STORAGE_MODE = (SUPABASE_URL&&SUPABASE_ANON_KEY) ? 'Supabase' : 'Local';
-    const locStore = {
-      load: () => { try { const r=localStorage.getItem('cellar-locations-v2'); return r?JSON.parse(r):null; } catch { return null; } },
-      save: locs => localStorage.setItem('cellar-locations-v2', JSON.stringify(locs)),
+    const session = {
+      get() { try { const r = localStorage.getItem(SESSION_KEY); const s = r ? JSON.parse(r) : null; return s && s.token ? s : null; } catch { return null; } },
+      set(s) { try { localStorage.setItem(SESSION_KEY, JSON.stringify(s)); } catch {} },
+      clear() { try { localStorage.removeItem(SESSION_KEY); } catch {} },
     };
-    const scaleStore = {
-      load: () => { try { const r=localStorage.getItem('cellar-scale-v1'); return r?JSON.parse(r):null; } catch { return null; } },
-      save: s => localStorage.setItem('cellar-scale-v1', JSON.stringify(s)),
+    let onUnauthorized = () => {};
+    async function api(method, path, body, opts) {
+      const s = session.get();
+      const headers = {};
+      if (s) headers.Authorization = 'Bearer ' + s.token;
+      if (body !== undefined) headers['Content-Type'] = 'application/json';
+      let res;
+      try { res = await fetch(API_BASE + path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, keepalive: !!(opts && opts.keepalive) }); }
+      catch { throw new ApiError(0, 'network', 'Could not reach the server. Check your connection.'); }
+      let data = null; try { data = await res.json(); } catch {}
+      if (!res.ok) {
+        if (res.status === 401 && s) onUnauthorized();
+        throw new ApiError(res.status, (data && data.error) || 'error', data && data.message);
+      }
+      return data;
+    }
+
+    // Data model: drinks[] where each drink has embedded stock[]. Money is whole cents on
+    // the server (price_cents); the page keeps dollars in `price`, and `_v` is the version
+    // the server last gave us (a stale edit is refused with a 409).
+    const toCents = p => (p === null || p === undefined || p === '') ? null : Math.round(Number(p) * 100);
+    const fromApiDrink = ({ version, price_cents, ...d }) => ({ ...d, price: price_cents == null ? null : price_cents / 100, _v: version });
+    const toApiDrink = ({ _v, price, ...d }) => ({ ...d, price_cents: toCents(price) });
+
+    const store = {
+      async load() { const r = await api('GET', '/cellar'); return { drinks: r.drinks.map(fromApiDrink), settings: r.settings }; },
+      async upsert(d) { const r = await api('PUT', '/drinks/' + encodeURIComponent(d.id), { drink: toApiDrink(d), version: d._v ?? null }); return { ...d, _v: r.version }; },
+      // Atomic per request of up to 50 drinks.
+      async upsertMany(ds) {
+        const out = [];
+        for (let i = 0; i < ds.length; i += 50) {
+          const chunk = ds.slice(i, i + 50);
+          const r = await api('POST', '/drinks/bulk', { items: chunk.map(d => ({ drink: toApiDrink(d), version: d._v ?? null })) });
+          const vm = new Map(r.versions.map(v => [v.id, v.version]));
+          chunk.forEach(d => out.push({ ...d, _v: vm.get(d.id) }));
+        }
+        return out;
+      },
+      async remove(d) { await api('DELETE', '/drinks/' + encodeURIComponent(d.id) + (d._v ? '?version=' + d._v : '')); },
+      async saveSettings(patch, version, opts) { const r = await api('PUT', '/settings', { ...patch, version }, opts); return r.version; },
+      op(name, body) { return api('POST', '/ops/' + name, body || {}); },
     };
 
     // ─── Constants ────────────────────────────────────────────────────────
@@ -333,7 +373,7 @@
     // ─── Helpers ──────────────────────────────────────────────────────────
     const cap  = s => s ? s.charAt(0).toUpperCase() + s.slice(1) : '';
     const uid  = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-    const today = () => new Date().toISOString().split('T')[0];
+    const today = () => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };   // the person's own date, not UTC
     const bottleColor = d => {
       if (!d) return '#555';
       return d.type === 'wine' ? (BOTTLE_COLORS.wine[d.wineColor] || '#8B1A35') : (BOTTLE_COLORS.whisky[d.whiskyStyle] || '#C07A2A');
@@ -443,22 +483,22 @@
     }
 
     // ─── Shared UI ────────────────────────────────────────────────────────
-    function Btn({ onClick, variant='ghost', style:sx, children }) {
+    function Btn({ onClick, variant='ghost', style:sx, disabled, children }) {
       const v = {
         ghost:   { background:'none',    border:'1px solid #3A2818', color:'#9A7D65' },
         primary: { background:'#C8922A', border:'none',              color:'#0C0806', fontWeight:'700' },
         danger:  { background:'#2A0808', border:'1px solid #8B2020', color:'#E88080' },
       };
-      return <button onClick={onClick} style={{padding:'6px 13px',borderRadius:'5px',fontSize:'12px',...v[variant],...sx}}>{children}</button>;
+      return <button onClick={onClick} disabled={disabled} style={{padding:'6px 13px',borderRadius:'5px',fontSize:'12px',...v[variant],...sx,...(disabled?{cursor:'not-allowed'}:{})}}>{children}</button>;
     }
     function TypeTag({ active, color, onClick, children }) {
-      return <button onClick={onClick} style={{padding:'5px 12px',borderRadius:'14px',fontSize:'11px',textTransform:'capitalize',whiteSpace:'nowrap',border:active?`1px solid ${color}`:'1px solid #1E1610',background:active?`${color}22`:'transparent',color:active?color:'#6A5040'}}>{children}</button>;
+      return <button onClick={onClick} style={{padding:'5px 12px',borderRadius:'14px',fontSize:'11px',textTransform:'capitalize',whiteSpace:'nowrap',border:active?`1px solid ${color}`:'1px solid #1E1610',background:active?`${color}22`:'transparent',color:active?color:'#9E8771'}}>{children}</button>;
     }
     function FField({ label, children, hint }) {
       return (<div>
-        <label style={{display:'block',fontSize:'10px',color:'#8A6A50',textTransform:'uppercase',letterSpacing:'.09em',fontWeight:'600',marginBottom:'5px'}}>{label}</label>
+        <label style={{display:'block',fontSize:'10px',color:'#A88C71',textTransform:'uppercase',letterSpacing:'.09em',fontWeight:'600',marginBottom:'5px'}}>{label}</label>
         {children}
-        {hint && <div style={{fontSize:'10px',color:'#3A2818',marginTop:'4px'}}>{hint}</div>}
+        {hint && <div style={{fontSize:'10px',color:'#94816A',marginTop:'4px'}}>{hint}</div>}
       </div>);
     }
     function FRow({ children }) {
@@ -466,20 +506,20 @@
     }
     function Box({ accentColor, title, children, style:sx }) {
       return (<div style={{background:'#0E0A07',borderRadius:'8px',padding:'16px',border:'1px solid #1A1008',...sx}}>
-        {title && <div style={{fontSize:'9px',color:accentColor||'#4A3020',textTransform:'uppercase',letterSpacing:'.1em',fontWeight:'600',marginBottom:'12px'}}>{title}</div>}
+        {title && <div style={{fontSize:'9px',color:accentColor||'#9A836C',textTransform:'uppercase',letterSpacing:'.1em',fontWeight:'600',marginBottom:'12px'}}>{title}</div>}
         {children}
       </div>);
     }
     function DSection({ title, children }) {
       return (<div style={{marginBottom:'18px'}}>
-        <div style={{fontSize:'9px',color:'#8A6A50',textTransform:'uppercase',letterSpacing:'.12em',fontWeight:'600',marginBottom:'9px'}}>{title}</div>
+        <div style={{fontSize:'9px',color:'#A88C71',textTransform:'uppercase',letterSpacing:'.12em',fontWeight:'600',marginBottom:'9px'}}>{title}</div>
         {children}
       </div>);
     }
     function DRow({ label, value }) {
       if (!value) return null;
       return (<div style={{display:'flex',justifyContent:'space-between',gap:'8px',marginBottom:'5px'}}>
-        <span style={{fontSize:'11px',color:'#7A5840',flexShrink:0}}>{label}</span>
+        <span style={{fontSize:'11px',color:'#A3886E',flexShrink:0}}>{label}</span>
         <span style={{fontSize:'11px',color:'#B09070',textAlign:'right'}}>{value}</span>
       </div>);
     }
@@ -487,12 +527,12 @@
       const descFirst = new Set(['rating','year','ageStatement']);
       return (
         <div style={{display:'flex',alignItems:'center',gap:'6px',overflowX:'auto',WebkitOverflowScrolling:'touch',scrollbarWidth:'none',msOverflowStyle:'none',paddingBottom:'1px'}}>
-          <span style={{fontSize:'10px',color:'#7A5840',textTransform:'uppercase',letterSpacing:'.08em',whiteSpace:'nowrap',marginRight:'2px',flexShrink:0}}>Sort</span>
+          <span style={{fontSize:'10px',color:'#A3886E',textTransform:'uppercase',letterSpacing:'.08em',whiteSpace:'nowrap',marginRight:'2px',flexShrink:0}}>Sort</span>
           {getSortOptions(typeFilter).map(([key,label]) => {
             const active = sortBy === key;
             const defaultDir = descFirst.has(key) ? 'desc' : 'asc';
             return (<button key={key} onClick={() => onChange(key, active ? (sortDir==='asc'?'desc':'asc') : defaultDir)}
-              style={{padding:'5px 11px',borderRadius:'14px',fontSize:'11px',whiteSpace:'nowrap',flexShrink:0,border:active?'1px solid #C8922A':'1px solid #1E1610',background:active?'#1C1208':'transparent',color:active?'#C8922A':'#8A6A50',fontWeight:active?'600':'400'}}>
+              style={{padding:'5px 11px',borderRadius:'14px',fontSize:'11px',whiteSpace:'nowrap',flexShrink:0,border:active?'1px solid #C8922A':'1px solid #1E1610',background:active?'#1C1208':'transparent',color:active?'#C8922A':'#A88C71',fontWeight:active?'600':'400'}}>
               {label}{active ? (sortDir==='asc' ? ' ↑' : ' ↓') : ''}
             </button>);
           })}
@@ -626,13 +666,13 @@
       if (mode === 'finish') return <InlineBox title="Mark as finished">
         {entry.quantity > 1 && (
           <div style={{display:'flex',alignItems:'center',gap:'10px'}}>
-            <span style={{fontSize:'12px',color:'#7A5840'}}>How many?</span>
+            <span style={{fontSize:'12px',color:'#A3886E'}}>How many?</span>
             <button onClick={()=>setActionQty(q=>Math.max(1,q-1))}
               style={{width:'28px',height:'28px',borderRadius:'5px',background:'#160E08',border:'1px solid #2A1E16',color:'#C0A890',fontSize:'16px',lineHeight:1}}>-</button>
             <span style={{fontFamily:"'Playfair Display', serif",fontSize:'18px',color:'#C8922A',minWidth:'20px',textAlign:'center'}}>{actionQty}</span>
             <button onClick={()=>setActionQty(q=>Math.min(entry.quantity,q+1))}
               style={{width:'28px',height:'28px',borderRadius:'5px',background:'#160E08',border:'1px solid #2A1E16',color:'#C0A890',fontSize:'16px',lineHeight:1}}>+</button>
-            <span style={{fontSize:'11px',color:'#4A3020'}}>of {entry.quantity}</span>
+            <span style={{fontSize:'11px',color:'#9A836C'}}>of {entry.quantity}</span>
           </div>
         )}
         <div style={{display:'flex',gap:'8px'}}>
@@ -646,14 +686,14 @@
       if (mode === 'move') return <InlineBox title="Move to…">
         {entry.quantity > 1 && (
           <div style={{display:'flex',alignItems:'center',gap:'10px'}}>
-            <span style={{fontSize:'12px',color:'#7A5840'}}>How many?</span>
+            <span style={{fontSize:'12px',color:'#A3886E'}}>How many?</span>
             <button onClick={()=>setActionQty(q=>Math.max(1,q-1))}
               style={{width:'28px',height:'28px',borderRadius:'5px',background:'#160E08',border:'1px solid #2A1E16',color:'#C0A890',fontSize:'16px',lineHeight:1}}>-</button>
             <span style={{fontFamily:"'Playfair Display', serif",fontSize:'18px',color:'#C8922A',minWidth:'20px',textAlign:'center'}}>{Math.min(actionQty,maxMoveQty)}</span>
             <button onClick={()=>setActionQty(q=>Math.min(maxMoveQty,q+1))}
               style={{width:'28px',height:'28px',borderRadius:'5px',background:'#160E08',border:'1px solid #2A1E16',color:'#C0A890',fontSize:'16px',lineHeight:1}}>+</button>
-            <span style={{fontSize:'11px',color:'#4A3020'}}>of {entry.quantity}</span>
-            {maxMoveQty < entry.quantity && <span style={{fontSize:'10px',color:'#7A5840'}}>(position racks: 1 per slot)</span>}
+            <span style={{fontSize:'11px',color:'#9A836C'}}>of {entry.quantity}</span>
+            {maxMoveQty < entry.quantity && <span style={{fontSize:'10px',color:'#A3886E'}}>(position racks: 1 per slot)</span>}
           </div>
         )}
         <select value={loc} onChange={e=>handleLocChange(e.target.value)} style={{fontSize:'12px',padding:'7px 10px'}}>
@@ -691,7 +731,7 @@
           <div style={{flex:1,minWidth:0}}>
             {isStale && <div style={{fontSize:'10px',color:'#C8602A',marginBottom:'3px',fontWeight:'600'}}>⚠ Location no longer valid — please move</div>}
             <div style={{fontSize:'12px',color:isStale?'#C8602A':'#C0A890'}}>{locName(entry.location)}</div>
-            <div style={{fontSize:'11px',color:'#5A4030',marginTop:'1px'}}>
+            <div style={{fontSize:'11px',color:'#9C856E',marginTop:'1px'}}>
               {entry.sublocation}
               {entry.position ? ` · Position ${entry.position}` : ''}
               {' · '}{entry.quantity} {entry.quantity===1?'bottle':'bottles'}
@@ -700,7 +740,7 @@
           <div style={{display:'flex',gap:'4px',flexShrink:0}}>
             <Btn onClick={()=>openMode('move')}   style={{fontSize:'10px',padding:'4px 9px',border:'1px solid #4A3020',color:isStale?'#C8922A':'#B09070'}}>Move</Btn>
             <Btn onClick={()=>openMode('finish')} style={{fontSize:'10px',padding:'4px 9px',border:'1px solid #4A3020',color:'#B09070'}}>Finished</Btn>
-            <button onClick={()=>onRemove(drinkId,entry.id)} style={{background:'none',border:'none',color:'#6A5040',fontSize:'14px',padding:'2px 4px'}}>✕</button>
+            <button onClick={()=>onRemove(drinkId,entry.id)} style={{background:'none',border:'none',color:'#9E8771',fontSize:'14px',padding:'2px 4px'}}>✕</button>
           </div>
         </div>
       );
@@ -722,7 +762,7 @@
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'20px'}}>
           <div>
             <button className="det-back"  onClick={onClose} style={{background:'none',border:'none',color:'#C8922A',fontSize:'14px'}}>← Back</button>
-            <button className="det-close" onClick={onClose} style={{background:'none',border:'none',color:'#4A3020',fontSize:'16px'}}>✕</button>
+            <button className="det-close" onClick={onClose} style={{background:'none',border:'none',color:'#9A836C',fontSize:'16px'}}>✕</button>
           </div>
           <div style={{display:'flex',gap:'6px',flexWrap:'wrap',justifyContent:'flex-end'}}>
             <Btn onClick={()=>onEdit(drink)}>Edit</Btn>
@@ -736,7 +776,7 @@
           <div style={{minWidth:0}}>
             <div style={{fontFamily:"'Playfair Display', serif",fontSize:'18px',fontWeight:'700',color:'#F0E6D3',lineHeight:'1.3',marginBottom:'5px'}}>{drink.name}</div>
             {drink.producer && <div style={{fontSize:'13px',color:'#9A7D65',marginBottom:'3px'}}>{drink.producer}</div>}
-            {(drink.year || drink.isNV) && <div style={{fontSize:'12px',color:drink.isNV?'#C8922A':'#5A4030'}}>{drink.isNV?'Non-Vintage':drink.year}</div>}
+            {(drink.year || drink.isNV) && <div style={{fontSize:'12px',color:drink.isNV?'#C8922A':'#9C856E'}}>{drink.isNV?'Non-Vintage':drink.year}</div>}
           </div>
         </div>
 
@@ -747,8 +787,8 @@
               <div style={{display:'flex',alignItems:'center',gap:'10px'}}>
                 <div style={{fontFamily:"'Playfair Display', serif",fontSize:'48px',fontWeight:'700',color:'#C8922A',lineHeight:'1'}}>{drink.rating}</div>
                 <div>
-                  <div style={{fontSize:'10px',color:'#7A5840',textTransform:'uppercase',letterSpacing:'.08em'}}>My Score</div>
-                  {drink.reviewDate && <div style={{fontSize:'11px',color:'#5A4030',marginTop:'2px'}}>{drink.reviewDate}</div>}
+                  <div style={{fontSize:'10px',color:'#A3886E',textTransform:'uppercase',letterSpacing:'.08em'}}>My Score</div>
+                  {drink.reviewDate && <div style={{fontSize:'11px',color:'#9C856E',marginTop:'2px'}}>{drink.reviewDate}</div>}
                 </div>
               </div>
             )}
@@ -756,8 +796,8 @@
               <div style={{display:'flex',alignItems:'center',gap:'10px'}}>
                 <div style={{fontFamily:"'Playfair Display', serif",fontSize:'48px',fontWeight:'700',color:'#7090B8',lineHeight:'1'}}>{drink.expertRating}</div>
                 <div>
-                  <div style={{fontSize:'10px',color:'#5070A0',textTransform:'uppercase',letterSpacing:'.08em'}}>Expert</div>
-                  {drink.expertSource && <div style={{fontSize:'11px',color:'#3A4A60',marginTop:'2px'}}>{drink.expertSource}</div>}
+                  <div style={{fontSize:'10px',color:'#607EAA',textTransform:'uppercase',letterSpacing:'.08em'}}>Expert</div>
+                  {drink.expertSource && <div style={{fontSize:'11px',color:'#73839A',marginTop:'2px'}}>{drink.expertSource}</div>}
                 </div>
               </div>
             )}
@@ -775,7 +815,7 @@
             {addingStock ? (
               <AddStockForm onAdd={entry=>{onAddStock(drink.id,entry);setAddingStock(false);}} onCancel={()=>setAddingStock(false)} occupiedPositions={occupiedPositions}/>
             ) : (
-              <button onClick={()=>setAddingStock(true)} style={{marginTop:'6px',background:'none',border:'1px dashed #2A1E16',color:'#5A4030',padding:'7px 14px',borderRadius:'5px',fontSize:'11px',width:'100%'}}>
+              <button onClick={()=>setAddingStock(true)} style={{marginTop:'6px',background:'none',border:'1px dashed #2A1E16',color:'#9C856E',padding:'7px 14px',borderRadius:'5px',fontSize:'11px',width:'100%'}}>
                 + Add Another Location
               </button>
             )}
@@ -783,7 +823,7 @@
         )}
         {inStock.length === 0 && !addingStock && (
           <div style={{marginBottom:'16px'}}>
-            <button onClick={()=>setAddingStock(true)} style={{background:'none',border:'1px dashed #2A1E16',color:'#5A4030',padding:'8px 16px',borderRadius:'6px',fontSize:'12px',width:'100%'}}>
+            <button onClick={()=>setAddingStock(true)} style={{background:'none',border:'1px dashed #2A1E16',color:'#9C856E',padding:'8px 16px',borderRadius:'6px',fontSize:'12px',width:'100%'}}>
               + Add to Cellar
             </button>
           </div>
@@ -793,9 +833,9 @@
         {finished.length > 0 && (
           <DSection title="Finished">
             {finished.map(entry => (
-              <div key={entry.id} style={{fontSize:'11px',color:'#4A3020',marginBottom:'5px',display:'flex',justifyContent:'space-between'}}>
+              <div key={entry.id} style={{fontSize:'11px',color:'#9A836C',marginBottom:'5px',display:'flex',justifyContent:'space-between'}}>
                 <span>{locName(entry.location)} · {entry.sublocation}</span>
-                {entry.dateFinished && <span style={{color:'#3A2818'}}>{entry.dateFinished}</span>}
+                {entry.dateFinished && <span style={{color:'#94816A'}}>{entry.dateFinished}</span>}
               </div>
             ))}
           </DSection>
@@ -832,7 +872,7 @@
             <div style={{fontSize:'12px',color:'#9A7D65',lineHeight:'1.65',fontStyle:'italic'}}>"{drink.review}"</div>
           </DSection>
         )}
-        {drink.price != null && drink.price !== '' && <div style={{fontSize:'11px',color:'#7A5840',marginTop:'8px'}}>≈ ${drink.price} per bottle</div>}
+        {drink.price != null && drink.price !== '' && <div style={{fontSize:'11px',color:'#A3886E',marginTop:'8px'}}>≈ ${drink.price} per bottle</div>}
       </div>);
     }
 
@@ -841,14 +881,14 @@
       return (<div className="mob-header" style={{padding:'14px 20px 12px',background:'#090503',borderBottom:'1px solid #1A1008',justifyContent:'space-between',alignItems:'center',flexShrink:0}}>
         <div>
           <div style={{fontFamily:"'Playfair Display', serif",fontSize:'22px',fontWeight:'700',color:'#C8922A',lineHeight:1}}>My Cellar</div>
-          <div style={{fontSize:'10px',color:'#7A5840',marginTop:'3px',letterSpacing:'.1em',textTransform:'uppercase'}}>{drinkCount} {drinkCount===1?'drink':'drinks'}</div>
+          <div style={{fontSize:'10px',color:'#A3886E',marginTop:'3px',letterSpacing:'.1em',textTransform:'uppercase'}}>{drinkCount} {drinkCount===1?'drink':'drinks'}</div>
         </div>
         <div style={{display:'flex',alignItems:'center',gap:'14px'}}>
           {totalBottles > 0 && (<div style={{textAlign:'right'}}>
             <div style={{fontFamily:"'Playfair Display', serif",fontSize:'22px',fontWeight:'700',color:'#C8922A',lineHeight:1}}>{totalBottles}</div>
-            <div style={{fontSize:'10px',color:'#7A5840',marginTop:'3px',letterSpacing:'.1em',textTransform:'uppercase'}}>bottles</div>
+            <div style={{fontSize:'10px',color:'#A3886E',marginTop:'3px',letterSpacing:'.1em',textTransform:'uppercase'}}>bottles</div>
           </div>)}
-          <button onClick={()=>onNav('settings')} style={{background:'none',border:'none',color:'#3A2818',fontSize:'20px',cursor:'pointer',padding:'4px',lineHeight:1,flexShrink:0}} title="Cellar Management">⚙</button>
+          <button onClick={()=>onNav('settings')} style={{background:'none',border:'none',color:'#94816A',fontSize:'20px',cursor:'pointer',padding:'4px',lineHeight:1,flexShrink:0}} title="Cellar Management">⚙</button>
         </div>
       </div>);
     }
@@ -866,7 +906,7 @@
         {tabs.map(tab => {
           const active = view===tab.id || (tab.id==='map' && view==='locations');
           return (<div key={tab.id} onClick={tab.id==='add' ? onAdd : ()=>onNav(tab.id)}
-            style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',gap:'3px',padding:'10px 0 8px',cursor:'pointer',color:active?'#C8922A':'#7A5840'}}>
+            style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',gap:'3px',padding:'10px 0 8px',cursor:'pointer',color:active?'#C8922A':'#A3886E'}}>
             <span style={{fontSize:'22px',lineHeight:1}}>{tab.icon}</span>
             <span style={{fontSize:'10px',fontWeight:active?'600':'400'}}>{tab.label}</span>
           </div>);
@@ -875,7 +915,7 @@
     }
 
     // ─── Desktop Sidebar ───────────────────────────────────────────────────
-    function Sidebar({ view, onNav, onAdd, drinks }) {
+    function Sidebar({ view, onNav, onAdd, drinks, user }) {
       const inCellar  = drinks.filter(isInCellar);
       const wineCount = inCellar.filter(d=>d.type==='wine').length;
       const wkCount   = inCellar.filter(d=>d.type==='whisky').length;
@@ -888,7 +928,7 @@
       return (<aside className="app-sidebar" style={{width:'205px',flexShrink:0,background:'#090503',borderRight:'1px solid #1A1008',flexDirection:'column'}}>
         <div style={{padding:'22px 20px 16px',borderBottom:'1px solid #160E08'}}>
           <div style={{fontFamily:"'Playfair Display', serif",fontSize:'20px',fontWeight:'700',color:'#C8922A'}}>My Cellar</div>
-          <div style={{fontSize:'10px',color:'#7A5840',marginTop:'3px',letterSpacing:'.1em',textTransform:'uppercase'}}>{inCellar.length} in cellar</div>
+          <div style={{fontSize:'10px',color:'#A3886E',marginTop:'3px',letterSpacing:'.1em',textTransform:'uppercase'}}>{inCellar.length} in cellar</div>
         </div>
         <nav style={{padding:'11px 8px',flex:1}}>
           {NAV.map(item => {
@@ -906,17 +946,17 @@
           {[['Wine',wineCount,'#8B1A35'],['Whisky',wkCount,'#C07A2A']].map(([l,c,col])=>(
             <div key={l} style={{display:'flex',alignItems:'center',gap:'8px',marginBottom:'7px'}}>
               <div style={{width:'5px',height:'5px',borderRadius:'50%',background:col,flexShrink:0}}/>
-              <span style={{fontSize:'11px',color:'#3A2818',flex:1}}>{l}</span>
-              <span style={{fontSize:'11px',color:'#6A5040'}}>{c}</span>
+              <span style={{fontSize:'11px',color:'#94816A',flex:1}}>{l}</span>
+              <span style={{fontSize:'11px',color:'#9E8771'}}>{c}</span>
             </div>
           ))}
           {tv > 0 && (<div style={{marginTop:'8px',paddingTop:'8px',borderTop:'1px solid #160E08'}}>
-            <div style={{fontSize:'9px',color:'#3A2818',textTransform:'uppercase',letterSpacing:'.08em'}}>Est. Value</div>
+            <div style={{fontSize:'9px',color:'#94816A',textTransform:'uppercase',letterSpacing:'.08em'}}>Est. Value</div>
             <div style={{fontFamily:"'Playfair Display', serif",fontSize:'14px',color:'#C8922A',fontWeight:'600',marginTop:'2px'}}>${tv.toLocaleString()}</div>
           </div>)}
           <div style={{marginTop:'8px',paddingTop:'8px',borderTop:'1px solid #160E08',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-            <div style={{fontSize:'9px',color:'#6A5040',textTransform:'uppercase',letterSpacing:'.06em'}}>{STORAGE_MODE} storage</div>
-            <button onClick={()=>onNav('settings')} style={{background:'none',border:'none',color:'#3A2818',fontSize:'12px',cursor:'pointer',padding:'2px 4px'}} title="Cellar Management">⚙</button>
+            <div title={user.email} style={{fontSize:'10px',color:'#9E8771',letterSpacing:'.02em',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',maxWidth:'170px'}}>{user.name || user.email}</div>
+            <button onClick={()=>onNav('settings')} style={{background:'none',border:'none',color:'#94816A',fontSize:'12px',cursor:'pointer',padding:'2px 4px'}} title="Cellar Management">⚙</button>
           </div>
         </div>
       </aside>);
@@ -956,24 +996,24 @@
             <input type="text" placeholder="Search…" value={query} onChange={e=>setQuery(e.target.value)} style={{flex:1,minWidth:'130px'}}/>
             <div style={{display:'flex',gap:'5px'}}>
               {[['all','All'],['wine','Wine 🍷'],['whisky','Whisky 🥃']].map(([v,l])=>(
-                <button key={v} onClick={()=>handleTypeFilter(v)} style={{padding:'7px 12px',borderRadius:'20px',fontSize:'12px',whiteSpace:'nowrap',border:typeFilter===v?'1px solid #C8922A':'1px solid #1E1610',background:typeFilter===v?'#1C1208':'transparent',color:typeFilter===v?'#C8922A':'#5A4030',fontWeight:typeFilter===v?'600':'400'}}>{l}</button>
+                <button key={v} onClick={()=>handleTypeFilter(v)} style={{padding:'7px 12px',borderRadius:'20px',fontSize:'12px',whiteSpace:'nowrap',border:typeFilter===v?'1px solid #C8922A':'1px solid #1E1610',background:typeFilter===v?'#1C1208':'transparent',color:typeFilter===v?'#C8922A':'#9C856E',fontWeight:typeFilter===v?'600':'400'}}>{l}</button>
               ))}
             </div>
           </div>
           <div style={{padding:'6px 16px 10px',borderBottom:'1px solid #160E08',background:'#0A0604',flexShrink:0,display:'flex',justifyContent:'space-between',alignItems:'center',gap:'8px',flexWrap:'wrap'}}>
             <SortBar sortBy={sortBy} sortDir={sortDir} typeFilter={typeFilter} onChange={(k,d)=>{setSortBy(k);setSortDir(d);}}/>
             <div style={{display:'flex',alignItems:'center',gap:'6px',flexShrink:0}}>
-              <span style={{fontSize:'10px',color:'#7A5840',textTransform:'uppercase',letterSpacing:'.08em',whiteSpace:'nowrap',flexShrink:0}}>Rating</span>
+              <span style={{fontSize:'10px',color:'#A3886E',textTransform:'uppercase',letterSpacing:'.08em',whiteSpace:'nowrap',flexShrink:0}}>Rating</span>
               {[['personal','Mine'],['expert','Expert'],['both','Both']].map(([v,l])=>(
-                <button key={v} onClick={()=>setRatingMode(v)} style={{padding:'4px 9px',borderRadius:'12px',fontSize:'10px',border:ratingMode===v?'1px solid #7090B8':'1px solid #1E1610',background:ratingMode===v?'#080C18':'transparent',color:ratingMode===v?'#7090B8':'#5A4030',whiteSpace:'nowrap'}}>{l}</button>
+                <button key={v} onClick={()=>setRatingMode(v)} style={{padding:'4px 9px',borderRadius:'12px',fontSize:'10px',border:ratingMode===v?'1px solid #7090B8':'1px solid #1E1610',background:ratingMode===v?'#080C18':'transparent',color:ratingMode===v?'#7090B8':'#9C856E',whiteSpace:'nowrap'}}>{l}</button>
               ))}
             </div>
-            <span style={{fontSize:'11px',color:'#7A5840',whiteSpace:'nowrap'}}>{sorted.length} {sorted.length===1?'drink':'drinks'}</span>
+            <span style={{fontSize:'11px',color:'#A3886E',whiteSpace:'nowrap'}}>{sorted.length} {sorted.length===1?'drink':'drinks'}</span>
           </div>
           <div style={{flex:1,overflow:'auto',padding:'14px'}}>
             {sorted.length === 0 ? (
-              <div style={{textAlign:'center',padding:'80px 20px',color:'#3A2818'}}>
-                <div style={{fontFamily:"'Playfair Display', serif",fontSize:'18px',color:'#6A5030',marginBottom:'6px'}}>{cellarDrinks.length===0?'Your cellar is empty':'No drinks match'}</div>
+              <div style={{textAlign:'center',padding:'80px 20px',color:'#94816A'}}>
+                <div style={{fontFamily:"'Playfair Display', serif",fontSize:'18px',color:'#9E8768',marginBottom:'6px'}}>{cellarDrinks.length===0?'Your cellar is empty':'No drinks match'}</div>
                 <div style={{fontSize:'12px'}}>{cellarDrinks.length===0?'Add your first bottle to begin':'Try adjusting your search or filter'}</div>
               </div>
             ) : (
@@ -1005,13 +1045,13 @@
         <div style={{height:'64px',display:'flex',alignItems:'center',justifyContent:'center'}}><Bottle drink={drink} size={64}/></div>
         <div style={{textAlign:'center',width:'100%'}}>
           <div style={{fontFamily:"'Playfair Display', serif",fontSize:'12px',fontWeight:'600',color:'#E8DCC8',lineHeight:'1.35',overflow:'hidden',display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical',marginBottom:'2px'}}>{drink.name}</div>
-          {drink.producer && <div style={{fontSize:'10px',color:'#7A5840',marginBottom:'3px',overflow:'hidden',whiteSpace:'nowrap',textOverflow:'ellipsis'}}>{drink.producer}</div>}
-          <div style={{fontSize:'10px',color:'#5A4030',marginBottom:'2px',textTransform:'capitalize'}}>
+          {drink.producer && <div style={{fontSize:'10px',color:'#A3886E',marginBottom:'3px',overflow:'hidden',whiteSpace:'nowrap',textOverflow:'ellipsis'}}>{drink.producer}</div>}
+          <div style={{fontSize:'10px',color:'#9C856E',marginBottom:'2px',textTransform:'capitalize'}}>
             {drink.type==='wine' ? `${drink.wineColor||'wine'}${drink.isNV?' · NV':drink.year?` · ${drink.year}`:''}` : `${drink.whiskyStyle||'whisky'}${drink.isNAS?' · NAS':drink.ageStatement?` · ${drink.ageStatement}yr`:''}`}
           </div>
-          {drink.type==='wine' && drink.grape && <div style={{fontSize:'10px',color:'#5A4030',marginBottom:'2px',overflow:'hidden',whiteSpace:'nowrap',textOverflow:'ellipsis'}}>{drink.grape}</div>}
-          {drink.type==='whisky' && drink.whiskyRegion && <div style={{fontSize:'10px',color:'#5A4030',marginBottom:'2px',overflow:'hidden',whiteSpace:'nowrap',textOverflow:'ellipsis'}}>{drink.whiskyRegion}</div>}
-          {locText && <div style={{fontSize:'10px',color:'#7A5840',overflow:'hidden',whiteSpace:'nowrap',textOverflow:'ellipsis'}}>{locText}</div>}
+          {drink.type==='wine' && drink.grape && <div style={{fontSize:'10px',color:'#9C856E',marginBottom:'2px',overflow:'hidden',whiteSpace:'nowrap',textOverflow:'ellipsis'}}>{drink.grape}</div>}
+          {drink.type==='whisky' && drink.whiskyRegion && <div style={{fontSize:'10px',color:'#9C856E',marginBottom:'2px',overflow:'hidden',whiteSpace:'nowrap',textOverflow:'ellipsis'}}>{drink.whiskyRegion}</div>}
+          {locText && <div style={{fontSize:'10px',color:'#A3886E',overflow:'hidden',whiteSpace:'nowrap',textOverflow:'ellipsis'}}>{locText}</div>}
         </div>
         {(()=>{
           const showP=(ratingMode==='personal'||ratingMode==='both')&&drink.rating!=null;
@@ -1020,11 +1060,11 @@
           return (<div style={{display:'flex',gap:'4px',flexWrap:'wrap',justifyContent:'center'}}>
             {showP&&<div style={{display:'flex',alignItems:'baseline',gap:'2px',background:'#160E08',borderRadius:'5px',padding:'2px 8px'}}>
               <span style={{fontFamily:"'Playfair Display', serif",fontSize:'13px',fontWeight:'700',color:'#C8922A'}}>{drink.rating}</span>
-              <span style={{fontSize:'9px',color:'#3A2818'}}>pts</span>
+              <span style={{fontSize:'9px',color:'#94816A'}}>pts</span>
             </div>}
             {showE&&<div style={{display:'flex',alignItems:'baseline',gap:'2px',background:'#080C18',border:'1px solid #7090B822',borderRadius:'5px',padding:'2px 8px'}}>
               <span style={{fontFamily:"'Playfair Display', serif",fontSize:'13px',fontWeight:'700',color:'#7090B8'}}>{drink.expertRating}</span>
-              <span style={{fontSize:'9px',color:'#3A2818'}}>pts</span>
+              <span style={{fontSize:'9px',color:'#94816A'}}>pts</span>
             </div>}
           </div>);
         })()}
@@ -1042,7 +1082,7 @@
           <div style={{padding:'14px 18px 12px',borderBottom:'1px solid #160E08',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
             <div>
               <h1 style={{fontFamily:"'Playfair Display', serif",fontSize:'20px',fontWeight:'700',color:'#F0E6D3'}}>Cellar Map</h1>
-              <p style={{color:'#7A5840',fontSize:'11px',marginTop:'2px'}}>Tap any bottle for details</p>
+              <p style={{color:'#A3886E',fontSize:'11px',marginTop:'2px'}}>Tap any bottle for details</p>
             </div>
             <Btn onClick={onManageLocations}>⚙ Locations</Btn>
           </div>
@@ -1052,8 +1092,8 @@
                 entries={allStock.filter(s=>s.location===loc.id)}
                 selected={selected} onSelect={onSelect}/>
             ))}
-            {locations.length===0 && (<div style={{textAlign:'center',padding:'60px 20px',color:'#3A2818',gridColumn:'1 / -1'}}>
-              <div style={{fontFamily:"'Playfair Display', serif",fontSize:'17px',color:'#6A5030',marginBottom:'10px'}}>No locations defined</div>
+            {locations.length===0 && (<div style={{textAlign:'center',padding:'60px 20px',color:'#94816A',gridColumn:'1 / -1'}}>
+              <div style={{fontFamily:"'Playfair Display', serif",fontSize:'17px',color:'#9E8768',marginBottom:'10px'}}>No locations defined</div>
               <button onClick={onManageLocations} style={{background:'none',border:'1px solid #2A1E16',color:'#C8922A',padding:'8px 18px',borderRadius:'7px',fontSize:'13px'}}>Add your first location</button>
             </div>)}
           </div>
@@ -1071,7 +1111,7 @@
 
       function renderBottles(list) {
         return (<div style={{background:'#0A0604',borderRadius:'5px',minHeight:'32px',padding:'3px 6px',display:'flex',alignItems:'center',gap:'3px',flexWrap:'wrap',border:'1px solid #160E08'}}>
-          {list.length===0 ? <span style={{fontSize:'10px',color:'#1A1008',fontStyle:'italic'}}>empty</span> : list.map(e => {
+          {list.length===0 ? <span style={{fontSize:'10px',color:'#90806B',fontStyle:'italic'}}>empty</span> : list.map(e => {
             const isSel = selected?.id === e.drink.id;
             return (<div key={e.id} title={e.drink.name} onClick={()=>onSelect(isSel?null:e.drink)} style={{cursor:'pointer',position:'relative',transform:isSel?'scale(1.18)':'scale(1)',transition:'transform 0.1s'}}>
               <Bottle drink={e.drink} size={28} colorOverride={isSel?'#C8922A':undefined}/>
@@ -1084,18 +1124,18 @@
       return (<div style={{background:'#110B09',border:'1px solid #1A1008',borderRadius:'10px',overflow:'hidden'}}>
         <div style={{padding:'11px 14px 8px',borderBottom:'1px solid #160E08',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
           <div style={{fontFamily:"'Playfair Display', serif",fontSize:'13px',fontWeight:'600',color:loc.system?'#C8602A':'#C8922A'}}>{loc.name}{loc.system&&entries.length>0?' ⚠':''}</div>
-          <div style={{fontSize:'11px',color:'#3A2818'}}>{entries.reduce((s,e)=>s+e.quantity,0)} bottles</div>
+          <div style={{fontSize:'11px',color:'#94816A'}}>{entries.reduce((s,e)=>s+e.quantity,0)} bottles</div>
         </div>
         <div style={{padding:'10px 12px 12px'}}>
           {slots.map(slot => {
             const se = entries.filter(e=>e.sublocation===slot);
             return (<div key={slot} style={{marginBottom:'10px'}}>
-              <div style={{fontSize:'9px',color:'#6A5040',textTransform:'uppercase',letterSpacing:'.08em',marginBottom:'5px'}}>{slot}</div>
+              <div style={{fontSize:'9px',color:'#9E8771',textTransform:'uppercase',letterSpacing:'.08em',marginBottom:'5px'}}>{slot}</div>
               {hasPositions ? (<>
                 <PositionGrid positionsPerRow={loc.positionsPerRow} entries={se.filter(e=>e.position!=null)} selected={selected} onSelect={onSelect}/>
                 {se.filter(e=>e.position==null).length > 0 && (
                   <div style={{marginTop:'4px',padding:'4px 6px',background:'#0A0604',borderRadius:'4px',border:'1px dashed #2A1E16',display:'flex',alignItems:'center',gap:'4px',flexWrap:'wrap'}}>
-                    <span style={{fontSize:'9px',color:'#5A4030',marginRight:'2px'}}>No position:</span>
+                    <span style={{fontSize:'9px',color:'#9C856E',marginRight:'2px'}}>No position:</span>
                     {se.filter(e=>e.position==null).map(e => {
                       const isSel = selected?.id===e.drink.id;
                       return (<div key={e.id} title={e.drink.name} onClick={()=>onSelect(isSel?null:e.drink)} style={{cursor:'pointer',position:'relative',transform:isSel?'scale(1.18)':'scale(1)',transition:'transform 0.1s'}}>
@@ -1112,7 +1152,7 @@
               or when a slot was deleted after bottles were assigned to it. */}
           {unslotted.length > 0 && (
             <div style={{marginBottom:'10px'}}>
-              <div style={{fontSize:'9px',color:slots.length===0?'#6A5040':'#C8602A',textTransform:'uppercase',letterSpacing:'.08em',marginBottom:'5px'}}>
+              <div style={{fontSize:'9px',color:slots.length===0?'#9E8771':'#C8602A',textTransform:'uppercase',letterSpacing:'.08em',marginBottom:'5px'}}>
                 {slots.length === 0 ? 'Bottles' : 'No shelf assigned ⚠'}
               </div>
               {renderBottles(unslotted)}
@@ -1138,7 +1178,7 @@
               ? <Bottle drink={entry.drink} size={30} colorOverride={isSel?'#C8922A':undefined}/>
               : <div style={{opacity:0.13}}><WineBottle color="#8A6A50" size={30}/></div>
             }
-            <span style={{fontSize:'7px',color:entry?(isSel?'#C8922A':'#3A2818'):'#1E1410',lineHeight:1,marginTop:'1px'}}>{pos}</span>
+            <span style={{fontSize:'7px',color:entry?(isSel?'#C8922A':'#94816A'):'#1E1410',lineHeight:1,marginTop:'1px'}}>{pos}</span>
             {entry?.quantity>1 && (
               <span style={{position:'absolute',top:0,right:'-1px',fontSize:'7px',background:'#C8922A',color:'#0C0806',borderRadius:'3px',padding:'0 2px',fontWeight:'700',lineHeight:'1.4'}}>{entry.quantity}</span>
             )}
@@ -1231,16 +1271,16 @@
       return (<div style={{height:'100%',display:'flex',flexDirection:'column',overflow:'hidden'}}>
         <div style={{padding:'16px 18px',borderBottom:'1px solid #160E08',display:'flex',alignItems:'center',justifyContent:'space-between',background:'#0A0604',flexShrink:0}}>
           <h1 style={{fontFamily:"'Playfair Display', serif",fontSize:'19px',fontWeight:'700',color:'#F0E6D3'}}>Manage Locations</h1>
-          <button onClick={onClose} style={{background:'none',border:'none',color:'#4A3020',fontSize:'18px'}}>✕</button>
+          <button onClick={onClose} style={{background:'none',border:'none',color:'#9A836C',fontSize:'18px'}}>✕</button>
         </div>
         <div style={{flex:1,overflow:'auto',padding:'16px 18px 60px'}}>
-          <p style={{fontSize:'12px',color:'#8A6A50',marginBottom:'18px',lineHeight:'1.6'}}>Tap a name or shelf to rename. Set Positions per row on racks to enable numbered slot tracking.</p>
+          <p style={{fontSize:'12px',color:'#A88C71',marginBottom:'18px',lineHeight:'1.6'}}>Tap a name or shelf to rename. Set Positions per row on racks to enable numbered slot tracking.</p>
           {locations.map(loc => {
             const cnt = allStock.filter(s=>s.location===loc.id&&s.status==='in_stock').length;
             return <LocationEditor key={loc.id} loc={loc} bottleCount={cnt} onUpdate={updateLocation} onDelete={()=>deleteLocation(loc.id)}/>;
           })}
           <div style={{marginTop:'8px',padding:'16px',background:'#0E0A07',borderRadius:'8px',border:'1px solid #1A1008'}}>
-            <div style={{fontSize:'10px',color:'#7A5840',textTransform:'uppercase',letterSpacing:'.09em',fontWeight:'600',marginBottom:'10px'}}>Add New Location</div>
+            <div style={{fontSize:'10px',color:'#A3886E',textTransform:'uppercase',letterSpacing:'.09em',fontWeight:'600',marginBottom:'10px'}}>Add New Location</div>
             <div style={{display:'flex',gap:'8px'}}>
               <input value={newName} onChange={e=>setNewName(e.target.value)} placeholder="e.g. Guest Room Rack…" onKeyDown={e=>e.key==='Enter'&&addLocation()}/>
               <Btn onClick={addLocation} variant="primary" style={{whiteSpace:'nowrap',flexShrink:0,padding:'9px 16px'}}>Add</Btn>
@@ -1274,35 +1314,35 @@
         <div style={{padding:'13px 14px',borderBottom:'1px solid #160E08',display:'flex',alignItems:'center',gap:'10px'}}>
           <input value={name} onChange={e=>setName(e.target.value)} onBlur={saveName} readOnly={!!loc.system}
             style={{flex:1,fontFamily:"'Playfair Display', serif",fontSize:'14px',color:loc.system?'#9A7D65':'#C8922A',background:'transparent',border:'none',borderBottom:loc.system?'none':'1px solid #2A1A10',borderRadius:0,padding:'2px 4px',width:'auto',minWidth:0}}/>
-          <span style={{fontSize:'11px',color:'#7A5840',whiteSpace:'nowrap',flexShrink:0}}>{bottleCount} {bottleCount===1?'bottle':'bottles'}</span>
+          <span style={{fontSize:'11px',color:'#A3886E',whiteSpace:'nowrap',flexShrink:0}}>{bottleCount} {bottleCount===1?'bottle':'bottles'}</span>
           {!loc.system && (confirmDel ? <Btn onClick={onDelete} variant="danger" style={{flexShrink:0,whiteSpace:'nowrap'}}>Confirm</Btn> : <Btn onClick={()=>setConfirmDel(true)} style={{flexShrink:0}}>Delete</Btn>)}
         </div>
         <div style={{padding:'12px 14px'}}>
           <div style={{marginBottom:'14px',paddingBottom:'12px',borderBottom:'1px solid #160E08'}}>
-            <div style={{fontSize:'9px',color:'#7A5840',textTransform:'uppercase',letterSpacing:'.08em',marginBottom:'6px'}}>Positions per row <span style={{color:'#2A1808',textTransform:'none'}}>(optional — for numbered racks)</span></div>
+            <div style={{fontSize:'9px',color:'#A3886E',textTransform:'uppercase',letterSpacing:'.08em',marginBottom:'6px'}}>Positions per row <span style={{color:'#94816A',textTransform:'none'}}>(optional — for numbered racks)</span></div>
             <input type="number" value={positions} min="1" max="50" placeholder="e.g. 12"
               onChange={e=>setPositions(e.target.value)}
               onBlur={()=>onUpdate({...loc, positionsPerRow:positions!==''?+positions:null})}
               style={{maxWidth:'160px'}}/>
           </div>
-          <div style={{fontSize:'9px',color:'#7A5840',textTransform:'uppercase',letterSpacing:'.08em',marginBottom:'9px'}}>Rows / Shelves</div>
+          <div style={{fontSize:'9px',color:'#A3886E',textTransform:'uppercase',letterSpacing:'.08em',marginBottom:'9px'}}>Rows / Shelves</div>
           {slots.map((slot,i) => (
             <div key={i} style={{display:'flex',alignItems:'center',gap:'6px',marginBottom:'7px'}}>
               <div style={{display:'flex',flexDirection:'column',gap:'2px',flexShrink:0}}>
                 <button onClick={()=>i>0&&moveSlot(i,-1)} disabled={i===0}
-                  style={{background:'none',border:'1px solid #2A1E16',color:i===0?'#2A1E16':'#7A5840',width:'22px',height:'14px',borderRadius:'3px',fontSize:'9px',lineHeight:1,padding:0,display:'flex',alignItems:'center',justifyContent:'center'}}>
+                  style={{background:'none',border:'1px solid #2A1E16',color:i===0?'#2A1E16':'#A3886E',width:'22px',height:'14px',borderRadius:'3px',fontSize:'9px',lineHeight:1,padding:0,display:'flex',alignItems:'center',justifyContent:'center'}}>
                   ▲
                 </button>
                 <button onClick={()=>i<slots.length-1&&moveSlot(i,1)} disabled={i===slots.length-1}
-                  style={{background:'none',border:'1px solid #2A1E16',color:i===slots.length-1?'#2A1E16':'#7A5840',width:'22px',height:'14px',borderRadius:'3px',fontSize:'9px',lineHeight:1,padding:0,display:'flex',alignItems:'center',justifyContent:'center'}}>
+                  style={{background:'none',border:'1px solid #2A1E16',color:i===slots.length-1?'#2A1E16':'#A3886E',width:'22px',height:'14px',borderRadius:'3px',fontSize:'9px',lineHeight:1,padding:0,display:'flex',alignItems:'center',justifyContent:'center'}}>
                   ▼
                 </button>
               </div>
               <input value={slot} onChange={e=>{const s=[...slots];s[i]=e.target.value;setSlots(s);}} onBlur={()=>saveSlot(i)} style={{flex:1,fontSize:'12px',padding:'7px 10px'}}/>
-              <button onClick={()=>deleteSlot(i)} style={{background:'none',border:'1px solid #2A1E16',color:'#5A4030',width:'28px',height:'30px',borderRadius:'5px',fontSize:'12px',flexShrink:0}}>✕</button>
+              <button onClick={()=>deleteSlot(i)} style={{background:'none',border:'1px solid #2A1E16',color:'#9C856E',width:'28px',height:'30px',borderRadius:'5px',fontSize:'12px',flexShrink:0}}>✕</button>
             </div>
           ))}
-          <button onClick={addSlot} style={{marginTop:'4px',background:'none',border:'1px dashed #2A1E16',color:'#4A3020',padding:'7px 14px',borderRadius:'5px',fontSize:'11px',width:'100%'}}>+ Add row / shelf</button>
+          <button onClick={addSlot} style={{marginTop:'4px',background:'none',border:'1px dashed #2A1E16',color:'#9A836C',padding:'7px 14px',borderRadius:'5px',fontSize:'11px',width:'100%'}}>+ Add row / shelf</button>
         </div>
       </div>);
     }
@@ -1319,6 +1359,43 @@
       addToStock:true, location:'wine-fridge', sublocation:'Top Shelf', position:null, quantity:1,
     };
 
+    // "Look up details": asks the Worker for suggestions and fills EMPTY fields only. Nothing is overwritten and nothing is saved
+    // until the person saves the drink. Facts only (no ratings, prices or tasting notes).
+    const LOOKUP_LABELS = { wineColor:'colour', grape:'grape', region:'region', appellation:'appellation', whiskyStyle:'style', whiskyRegion:'region' };
+    function LookupBar({ form, setForm, isNew }) {
+      const [state, setState] = useState({ phase:'idle', text:'' });
+      const can = String(form.name||'').trim().length > 1 && state.phase !== 'busy';
+      async function run() {
+        setState({ phase:'busy', text:'' });
+        try {
+          const r = await api('POST', '/lookup', { type: form.type, name: String(form.name).trim(), producer: String(form.producer||'').trim() });
+          const s = (r && r.suggestions) || {};
+          const filled = [];
+          setForm(f => {
+            const u = { ...f };
+            // Colour and style start on a default (red, bourbon), so on a NEW drink a value still equal to the default counts as unset.
+            const unset = k => !u[k] || (isNew && (k === 'wineColor' || k === 'whiskyStyle') && u[k] === EMPTY_FORM[k]);
+            for (const k of Object.keys(LOOKUP_LABELS)) if (s[k] && unset(k)) { u[k] = s[k]; filled.push(LOOKUP_LABELS[k]); }
+            return u;
+          });
+          setTimeout(() => setState({ phase:'done', text: filled.length ? 'Suggested: ' + filled.join(', ') + '. Check before saving.' : 'Nothing to add: no confident suggestion, or those fields are already filled.' }), 0);
+        } catch (e) {
+          setState({ phase:'error', text: e instanceof ApiError ? e.message : 'Look up failed. Please try again.' });
+        }
+      }
+      return (
+        <div style={{display:'flex',alignItems:'center',gap:'12px',flexWrap:'wrap'}}>
+          <button type="button" onClick={run} disabled={!can}
+            style={{padding:'7px 14px',borderRadius:'6px',fontSize:'12px',border:'1px solid #C8922A',background:'#1C1208',color:'#C8922A',opacity:can?1:0.4}}>
+            {state.phase==='busy' ? 'Looking up...' : 'Look up details'}
+          </button>
+          <span style={{fontSize:'12px',color:state.phase==='error'?'#C0604A':'#A88C71'}}>
+            {state.phase==='idle' ? 'Fills empty fields only (and a colour or style you have not changed). Suggestions can be wrong, so check them.' : state.text}
+          </span>
+        </div>
+      );
+    }
+
     function AddEditView({ drink, onSave, onCancel }) {
       const locations = useLocations();
       const scale = useRatingScale();
@@ -1327,7 +1404,7 @@
         const base = { ...EMPTY_FORM, ...drink, tastingNotes:{nose:'',palate:'',finish:'',...(drink?.tastingNotes||{})} };
         // Default location to wine-fridge or whiskey-globe based on type
         if (!isEdit) {
-          const defId = (drink?.type||'wine')==='wine' ? 'wine-fridge' : 'whiskey-globe';
+          const defId = (drink?.type||'wine')==='wine' ? 'wine-fridge' : 'whisky-globe';
           base.location    = locations.find(l=>l.id===defId) ? defId : (locations[0]?.id||'');
           base.sublocation = locations.find(l=>l.id===base.location)?.slots[0] || '';
         }
@@ -1339,7 +1416,7 @@
         setForm(f => {
           const u = {...f, [key]:val};
           if (key==='type' && !isEdit) {
-            const defId = val==='wine' ? 'wine-fridge' : 'whiskey-globe';
+            const defId = val==='wine' ? 'wine-fridge' : 'whisky-globe';
             u.location    = locations.find(l=>l.id===defId) ? defId : (locations[0]?.id||'');
             u.sublocation = locations.find(l=>l.id===u.location)?.slots[0] || '';
             u.position    = null;
@@ -1386,7 +1463,7 @@
       return (<div style={{height:'100%',overflow:'auto'}}>
         <div style={{padding:'16px 18px',borderBottom:'1px solid #160E08',display:'flex',alignItems:'center',justifyContent:'space-between',background:'#0A0604',flexShrink:0}}>
           <h1 style={{fontFamily:"'Playfair Display', serif",fontSize:'19px',fontWeight:'700',color:'#F0E6D3'}}>{isEdit?'Edit Drink':'Add Drink'}</h1>
-          <button onClick={onCancel} style={{background:'none',border:'none',color:'#4A3020',fontSize:'18px'}}>✕</button>
+          <button onClick={onCancel} style={{background:'none',border:'none',color:'#9A836C',fontSize:'18px'}}>✕</button>
         </div>
         <div style={{padding:'18px 18px 60px',maxWidth:'600px'}}>
           <div style={{display:'flex',gap:'8px',marginBottom:'18px',alignItems:'center'}}>
@@ -1396,13 +1473,13 @@
               </div>
             ) : (
               [['wine','🍷  Wine'],['whisky','🥃  Whisky']].map(([v,l])=>(
-                <button key={v} onClick={()=>set('type',v)} style={{padding:'9px 18px',borderRadius:'7px',border:form.type===v?'1px solid #C8922A':'1px solid #1E1610',background:form.type===v?'#1C1208':'transparent',color:form.type===v?'#C8922A':'#5A4030',fontSize:'13px',fontWeight:form.type===v?'600':'400'}}>{l}</button>
+                <button key={v} onClick={()=>set('type',v)} style={{padding:'9px 18px',borderRadius:'7px',border:form.type===v?'1px solid #C8922A':'1px solid #1E1610',background:form.type===v?'#1C1208':'transparent',color:form.type===v?'#C8922A':'#9C856E',fontSize:'13px',fontWeight:form.type===v?'600':'400'}}>{l}</button>
               ))
             )}
           </div>
           <div style={{display:'flex',borderBottom:'1px solid #160E08',marginBottom:'18px'}}>
             {[['details','Details'],['review','Tasting & Review']].map(([t,l])=>(
-              <button key={t} onClick={()=>setTab(t)} style={{padding:'8px 16px',background:'none',border:'none',borderBottom:tab===t?'2px solid #C8922A':'2px solid transparent',color:tab===t?'#C8922A':'#5A4030',fontSize:'13px',fontWeight:tab===t?'600':'400',marginBottom:'-1px'}}>{l}</button>
+              <button key={t} onClick={()=>setTab(t)} style={{padding:'8px 16px',background:'none',border:'none',borderBottom:tab===t?'2px solid #C8922A':'2px solid transparent',color:tab===t?'#C8922A':'#9C856E',fontSize:'13px',fontWeight:tab===t?'600':'400',marginBottom:'-1px'}}>{l}</button>
             ))}
           </div>
 
@@ -1411,13 +1488,14 @@
               <FField label="Name *"><input value={form.name} onChange={e=>set('name',e.target.value)} placeholder={form.type==='wine'?'e.g. Château Margaux':'e.g. Macallan 18'}/></FField>
               <FField label="Producer"><input value={form.producer} onChange={e=>set('producer',e.target.value)} placeholder={form.type==='wine'?'Winery':'Distillery'}/></FField>
             </FRow>
+            <LookupBar form={form} setForm={setForm} isNew={!isEdit}/>
             <FRow>
               {form.type==='wine' && (<FField label="Vintage">
                 <div style={{display:'flex',gap:'8px',alignItems:'center'}}>
                   {!form.isNV && <input type="number" value={form.year} onChange={e=>set('year',e.target.value)} placeholder="e.g. 2019" min="1900" max="2099" style={{flex:1}}/>}
                   {form.isNV && <span style={{flex:1,fontSize:'13px',color:'#C8922A',fontWeight:'600'}}>NV</span>}
                   <button onClick={()=>{set('isNV',!form.isNV);if(!form.isNV)set('year','');}}
-                    style={{padding:'7px 12px',borderRadius:'6px',fontSize:'11px',whiteSpace:'nowrap',border:form.isNV?'1px solid #C8922A':'1px solid #2A1E16',background:form.isNV?'#1C1208':'transparent',color:form.isNV?'#C8922A':'#6A5040'}}>
+                    style={{padding:'7px 12px',borderRadius:'6px',fontSize:'11px',whiteSpace:'nowrap',border:form.isNV?'1px solid #C8922A':'1px solid #2A1E16',background:form.isNV?'#1C1208':'transparent',color:form.isNV?'#C8922A':'#9E8771'}}>
                     NV
                   </button>
                 </div>
@@ -1442,7 +1520,7 @@
                       {!form.isNAS && <input type="number" value={form.ageStatement} onChange={e=>set('ageStatement',e.target.value)} placeholder="Years" min="0" style={{flex:1}}/>}
                       {form.isNAS && <span style={{flex:1,fontSize:'13px',color:'#C8922A',fontWeight:'600'}}>NAS</span>}
                       <button onClick={()=>{set('isNAS',!form.isNAS);if(!form.isNAS)set('ageStatement','');}}
-                        style={{padding:'7px 12px',borderRadius:'6px',fontSize:'11px',whiteSpace:'nowrap',border:form.isNAS?'1px solid #C8922A':'1px solid #2A1E16',background:form.isNAS?'#1C1208':'transparent',color:form.isNAS?'#C8922A':'#6A5040'}}>
+                        style={{padding:'7px 12px',borderRadius:'6px',fontSize:'11px',whiteSpace:'nowrap',border:form.isNAS?'1px solid #C8922A':'1px solid #2A1E16',background:form.isNAS?'#1C1208':'transparent',color:form.isNAS?'#C8922A':'#9E8771'}}>
                         NAS
                       </button>
                     </div>
@@ -1460,7 +1538,7 @@
                   style={{width:'36px',height:'20px',borderRadius:'10px',border:'none',background:form.addToStock?'#C8922A':'#2A1E16',position:'relative',flexShrink:0,transition:'background 0.2s'}}>
                   <div style={{width:'14px',height:'14px',borderRadius:'50%',background:'white',position:'absolute',top:'3px',left:form.addToStock?'19px':'3px',transition:'left 0.2s'}}/>
                 </button>
-                <span style={{fontSize:'12px',color:'#7A6050'}}>{form.addToStock?'Yes — add to cellar now':'No — just logging a tasting'}</span>
+                <span style={{fontSize:'12px',color:'#A18A75'}}>{form.addToStock?'Yes — add to cellar now':'No — just logging a tasting'}</span>
               </div>
               {form.addToStock && (<div style={{display:'flex',flexDirection:'column',gap:'11px'}}>
                 <FRow>
@@ -1499,10 +1577,10 @@
                     <input type="range" min="0" max="100" value={form.rating} onChange={e=>set('rating',+e.target.value)} style={{width:'100%'}}/>
                     <div style={{display:'flex',gap:'4px',flexWrap:'wrap',marginTop:'5px'}}>
                       {scale.map(([v,l])=>(
-                        <span key={v} style={{fontSize:'9px',color:'#7A5840',background:'#160E08',borderRadius:'3px',padding:'2px 6px',whiteSpace:'nowrap',cursor:'pointer'}} onClick={()=>set('rating',v)}>{v} {l}</span>
+                        <span key={v} style={{fontSize:'9px',color:'#A3886E',background:'#160E08',borderRadius:'3px',padding:'2px 6px',whiteSpace:'nowrap',cursor:'pointer'}} onClick={()=>set('rating',v)}>{v} {l}</span>
                       ))}
                     </div>
-                    <button onClick={()=>set('rating',null)} style={{marginTop:'8px',background:'none',border:'none',color:'#3A2818',fontSize:'11px',padding:0}}>Remove rating</button>
+                    <button onClick={()=>set('rating',null)} style={{marginTop:'8px',background:'none',border:'none',color:'#94816A',fontSize:'11px',padding:0}}>Remove rating</button>
                   </>) : <Btn onClick={()=>set('rating',85)}>Add rating</Btn>}
                 </div>
               </div>
@@ -1515,13 +1593,13 @@
                     <input type="range" min="0" max="100" value={form.expertRating} onChange={e=>set('expertRating',+e.target.value)} style={{width:'100%',accentColor:'#7090B8'}}/>
                     <div style={{display:'flex',gap:'4px',flexWrap:'wrap',marginTop:'5px'}}>
                       {EXPERT_SCALE.map(([v,l])=>(
-                        <span key={v} style={{fontSize:'9px',color:'#5070A0',background:'#080C18',borderRadius:'3px',padding:'2px 6px',whiteSpace:'nowrap',cursor:'pointer'}} onClick={()=>set('expertRating',v)}>{v} {l}</span>
+                        <span key={v} style={{fontSize:'9px',color:'#607EAA',background:'#080C18',borderRadius:'3px',padding:'2px 6px',whiteSpace:'nowrap',cursor:'pointer'}} onClick={()=>set('expertRating',v)}>{v} {l}</span>
                       ))}
                     </div>
                     <div style={{marginTop:'10px'}}>
                       <input value={form.expertSource||''} onChange={e=>set('expertSource',e.target.value)} placeholder="Source — e.g. Wine Spectator, Robert Parker" style={{width:'100%'}}/>
                     </div>
-                    <button onClick={()=>{set('expertRating',null);set('expertSource','');}} style={{marginTop:'8px',background:'none',border:'none',color:'#3A2818',fontSize:'11px',padding:0}}>Remove expert rating</button>
+                    <button onClick={()=>{set('expertRating',null);set('expertSource','');}} style={{marginTop:'8px',background:'none',border:'none',color:'#94816A',fontSize:'11px',padding:0}}>Remove expert rating</button>
                   </>) : <Btn onClick={()=>set('expertRating',88)}>Add expert rating</Btn>}
                 </div>
               </div>
@@ -1574,13 +1652,13 @@
               <input type="text" placeholder="Search…" value={query} onChange={e=>setQuery(e.target.value)} style={{flex:1,minWidth:'130px'}}/>
               <div style={{display:'flex',gap:'5px'}}>
                 {[['all','All'],['wine','Wine 🍷'],['whisky','Whisky 🥃']].map(([v,l])=>(
-                  <button key={v} onClick={()=>setTypeFilter(v)} style={{padding:'7px 12px',borderRadius:'20px',fontSize:'12px',whiteSpace:'nowrap',border:typeFilter===v?'1px solid #C8922A':'1px solid #1E1610',background:typeFilter===v?'#1C1208':'transparent',color:typeFilter===v?'#C8922A':'#5A4030',fontWeight:typeFilter===v?'600':'400'}}>{l}</button>
+                  <button key={v} onClick={()=>setTypeFilter(v)} style={{padding:'7px 12px',borderRadius:'20px',fontSize:'12px',whiteSpace:'nowrap',border:typeFilter===v?'1px solid #C8922A':'1px solid #1E1610',background:typeFilter===v?'#1C1208':'transparent',color:typeFilter===v?'#C8922A':'#9C856E',fontWeight:typeFilter===v?'600':'400'}}>{l}</button>
                 ))}
               </div>
             </div>
             <div style={{display:'flex',gap:'5px',flexWrap:'wrap',alignItems:'center'}}>
               {[['all','All tastings'],['in-stock','Still in cellar'],['finished','Finished']].map(([v,l])=>(
-                <button key={v} onClick={()=>setStockFilter(v)} style={{padding:'5px 11px',borderRadius:'14px',fontSize:'11px',whiteSpace:'nowrap',border:stockFilter===v?'1px solid #C8922A':'1px solid #1E1610',background:stockFilter===v?'#1C1208':'transparent',color:stockFilter===v?'#C8922A':'#5A4030',fontWeight:stockFilter===v?'600':'400'}}>{l}</button>
+                <button key={v} onClick={()=>setStockFilter(v)} style={{padding:'5px 11px',borderRadius:'14px',fontSize:'11px',whiteSpace:'nowrap',border:stockFilter===v?'1px solid #C8922A':'1px solid #1E1610',background:stockFilter===v?'#1C1208':'transparent',color:stockFilter===v?'#C8922A':'#9C856E',fontWeight:stockFilter===v?'600':'400'}}>{l}</button>
               ))}
               <div style={{marginLeft:'auto',display:'flex',gap:'4px',alignItems:'center'}}>
                 <SortBar sortBy={sortBy} sortDir={sortDir} typeFilter={typeFilter} onChange={(k,d)=>{setSortBy(k);setSortDir(d);}}/>
@@ -1590,8 +1668,8 @@
 
           <div style={{flex:1,overflow:'auto',padding:'14px 16px'}}>
             {sorted.length === 0 ? (
-              <div style={{textAlign:'center',padding:'60px 20px',color:'#3A2818'}}>
-                <div style={{fontFamily:"'Playfair Display', serif",fontSize:'18px',color:'#6A5030',marginBottom:'6px'}}>{tasted.length===0?'No tastings yet':'Nothing matches'}</div>
+              <div style={{textAlign:'center',padding:'60px 20px',color:'#94816A'}}>
+                <div style={{fontFamily:"'Playfair Display', serif",fontSize:'18px',color:'#9E8768',marginBottom:'6px'}}>{tasted.length===0?'No tastings yet':'Nothing matches'}</div>
                 <div style={{fontSize:'12px'}}>{tasted.length===0?'Rate a drink or mark one as finished to see it here':'Try adjusting your filters'}</div>
               </div>
             ) : (
@@ -1615,59 +1693,59 @@
       return (<div style={{background:'#110B09',border:`1px solid ${top3?'#2A1A08':'#160E08'}`,borderRadius:'10px',overflow:'hidden'}}>
         <div onClick={()=>setOpen(!open)} style={{padding:'14px 16px',display:'flex',alignItems:'center',gap:'12px',cursor:'pointer'}}>
           {/* Rank */}
-          <div style={{width:'26px',flexShrink:0,textAlign:'center',fontFamily:"'Playfair Display', serif",fontSize:'15px',fontWeight:'700',color:top3?'#C8922A':'#4A3828'}}>
+          <div style={{width:'26px',flexShrink:0,textAlign:'center',fontFamily:"'Playfair Display', serif",fontSize:'15px',fontWeight:'700',color:top3?'#C8922A':'#97846D'}}>
             {rank || '—'}
           </div>
           <Bottle drink={drink} size={34}/>
           <div style={{flex:1,minWidth:0}}>
             <div style={{fontFamily:"'Playfair Display', serif",fontSize:'14px',fontWeight:'600',color:'#E8DCC8',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{drink.name}</div>
-            <div style={{fontSize:'11px',color:'#3A2818',textTransform:'capitalize',marginTop:'2px'}}>
+            <div style={{fontSize:'11px',color:'#94816A',textTransform:'capitalize',marginTop:'2px'}}>
               {drink.type==='wine' ? `${drink.wineColor||'wine'}${drink.isNV?' NV':drink.year?` ${drink.year}`:''} · ${drink.region||''}` : `${drink.whiskyStyle||'whisky'}${drink.isNAS?' NAS':drink.ageStatement?` ${drink.ageStatement}yr`:''} · ${drink.whiskyRegion||''}`}
             </div>
             {/* Stock status badge */}
             <div style={{marginTop:'4px',display:'flex',gap:'6px',flexWrap:'wrap'}}>
               {total > 0 ? (
-                <span style={{fontSize:'10px',color:'#6A8A3A',background:'#2A3A1A',borderRadius:'4px',padding:'1px 6px'}}>{total} in cellar</span>
+                <span style={{fontSize:'10px',color:'#8DAB60',background:'#2A3A1A',borderRadius:'4px',padding:'1px 6px'}}>{total} in cellar</span>
               ) : (drink.stock||[]).some(s=>s.status==='finished') ? (
                 <span style={{fontSize:'10px',color:'#9A8060',background:'#2A1E16',borderRadius:'4px',padding:'1px 6px'}}>Finished</span>
               ) : (
-                <span style={{fontSize:'10px',color:'#7A5840'}}>Tasted only</span>
+                <span style={{fontSize:'10px',color:'#A3886E'}}>Tasted only</span>
               )}
             </div>
           </div>
           {drink.rating != null ? (
             <div style={{textAlign:'right',flexShrink:0}}>
               <div style={{fontFamily:"'Playfair Display', serif",fontSize:'28px',fontWeight:'700',color:'#C8922A',lineHeight:'1'}}>{drink.rating}</div>
-              <div style={{fontSize:'9px',color:'#2A1808'}}>pts</div>
+              <div style={{fontSize:'9px',color:'#94816A'}}>pts</div>
             </div>
           ) : (
-            <div style={{fontSize:'11px',color:'#3A2818',flexShrink:0}}>Unrated</div>
+            <div style={{fontSize:'11px',color:'#94816A',flexShrink:0}}>Unrated</div>
           )}
-          <div style={{color:'#2A1808',fontSize:'10px',marginLeft:'2px'}}>{open?'▲':'▼'}</div>
+          <div style={{color:'#94816A',fontSize:'10px',marginLeft:'2px'}}>{open?'▲':'▼'}</div>
         </div>
 
         {open && (<div style={{padding:'0 16px 14px',borderTop:'1px solid #160E08'}}>
           {drink.review && (
             <div style={{padding:'11px 0',borderBottom:hasNotes?'1px solid #160E08':'none'}}>
               <div style={{fontSize:'12px',color:'#9A7D65',lineHeight:'1.7',fontStyle:'italic'}}>"{drink.review}"</div>
-              {drink.reviewDate && <div style={{fontSize:'10px',color:'#3A2818',marginTop:'4px'}}>{drink.reviewDate}</div>}
+              {drink.reviewDate && <div style={{fontSize:'10px',color:'#94816A',marginTop:'4px'}}>{drink.reviewDate}</div>}
             </div>
           )}
           {hasNotes && (
             <div style={{paddingTop:'11px',display:'grid',gridTemplateColumns:'repeat(auto-fit, minmax(100px, 1fr))',gap:'10px',marginBottom:'11px'}}>
               {[['Nose','nose'],['Palate','palate'],['Finish','finish']].map(([l,k])=>drink.tastingNotes?.[k]?(
                 <div key={k}>
-                  <div style={{fontSize:'9px',color:'#2A1808',textTransform:'uppercase',letterSpacing:'.08em',marginBottom:'3px'}}>{l}</div>
-                  <div style={{fontSize:'11px',color:'#7A6050',lineHeight:'1.5'}}>{drink.tastingNotes[k]}</div>
+                  <div style={{fontSize:'9px',color:'#94816A',textTransform:'uppercase',letterSpacing:'.08em',marginBottom:'3px'}}>{l}</div>
+                  <div style={{fontSize:'11px',color:'#A18A75',lineHeight:'1.5'}}>{drink.tastingNotes[k]}</div>
                 </div>
               ):null)}
             </div>
           )}
           {stock.length > 0 && (
             <div style={{marginBottom:'10px'}}>
-              <div style={{fontSize:'9px',color:'#3A2818',textTransform:'uppercase',letterSpacing:'.08em',marginBottom:'5px'}}>In Cellar</div>
+              <div style={{fontSize:'9px',color:'#94816A',textTransform:'uppercase',letterSpacing:'.08em',marginBottom:'5px'}}>In Cellar</div>
               {stock.map(e=>(
-                <div key={e.id} style={{fontSize:'11px',color:'#5A4030',marginBottom:'3px'}}>
+                <div key={e.id} style={{fontSize:'11px',color:'#9C856E',marginBottom:'3px'}}>
                   {locName(e.location)} · {e.sublocation}{e.position?` · Position ${e.position}`:''} · {e.quantity} {e.quantity===1?'bottle':'bottles'}
                 </div>
               ))}
@@ -1715,7 +1793,61 @@
         phrase:'LOAD DEMO', btnLabel:'Load demo data' },
     ];
 
-    function SettingsView({ onClose, onDangerOp, onUpdateScale }) {
+    // Text colours for the danger-zone titles, phrases and buttons (the accent colours in DANGER_OPS stay for borders and backgrounds):
+    // [text on the dark panel, text on the confirm button]
+    const DANGER_TEXT = { unassign:['#C8922A','#0C0806'], clearstock:['#C8602A','#0C0806'], clearall:['#E06060','#F0E6D3'],
+      deletedrinks:['#E06060','#F0E6D3'], factory:['#E85555','#F0E6D3'], demo:['#6BA3C8','#F0E6D3'] };
+
+    function AccountBox({ user, onRename, onSignOut, onDelete, onExport }) {
+      const [name, setName] = useState(user.name || '');
+      const [msg, setMsg] = useState('');
+      const [del, setDel] = useState(false);
+      const [phrase, setPhrase] = useState('');
+      const [busy, setBusy] = useState(false);
+      // The exact phrase (surrounding spaces ignored). The Delete button is disabled until it matches, and doDelete checks it again.
+      const confirmed = phrase.trim() === 'DELETE ACCOUNT';
+      async function save() {
+        if (!name.trim()) return;
+        try { await onRename(name.trim()); setMsg('Saved'); } catch (e) { setMsg(e.message || 'Could not save'); }
+      }
+      async function doExport() {
+        try { await onExport(); setMsg('Your data was downloaded.'); } catch (e) { setMsg(e.message || 'Could not download your data.'); }
+      }
+      async function doDelete() {
+        if (!confirmed || busy) return;
+        setBusy(true);
+        try { await onDelete(); } finally { setBusy(false); }
+      }
+      return (
+        <div style={{marginBottom:'28px',border:'1px solid #1C1208',borderRadius:'8px',padding:'14px 16px',background:'#0F0906'}}>
+          <div style={{fontSize:'13px',fontWeight:'600',color:'#C0A890'}}>Account</div>
+          <div style={{fontSize:'11px',color:'#9C856E',margin:'2px 0 12px'}}>Signed in as {user.email}</div>
+          <div style={{display:'flex',gap:'8px',marginBottom:'6px'}}>
+            <input value={name} onChange={e=>{setName(e.target.value);setMsg('');}} placeholder="Display name" maxLength={80}/>
+            <Btn onClick={save} disabled={!name.trim()} style={{fontSize:'12px',padding:'7px 14px',flexShrink:0}}>Save</Btn>
+          </div>
+          <div style={{fontSize:'11px',color:'#A3886E',minHeight:'14px',marginBottom:'10px'}}>{msg}</div>
+          <div style={{display:'flex',gap:'8px',flexWrap:'wrap'}}>
+            <Btn onClick={onSignOut} style={{fontSize:'12px',padding:'7px 14px'}}>Sign out</Btn>
+            <Btn onClick={doExport} style={{fontSize:'12px',padding:'7px 14px'}}>Download my data</Btn>
+            <Btn onClick={()=>setDel(!del)} style={{fontSize:'12px',padding:'7px 14px',color:'#C8602A'}}>Delete my account</Btn>
+          </div>
+          {del && (
+            <div style={{marginTop:'12px',paddingTop:'12px',borderTop:'1px solid #1C1208'}}>
+              <p style={{fontSize:'12px',color:'#A68E7A',lineHeight:'1.6',marginBottom:'10px'}}>This permanently deletes your account and everything in your cellar: drinks, tasting notes, ratings, locations. There is no undo. To use My Cellar again you would need a new invitation.</p>
+              <div style={{fontSize:'12px',color:'#9E8771',marginBottom:'8px'}}>Type <strong style={{color:'#C8602A',fontFamily:'monospace'}}>DELETE ACCOUNT</strong> to confirm:</div>
+              <div style={{display:'flex',gap:'8px'}}>
+                <input value={phrase} onChange={e=>setPhrase(e.target.value)} placeholder="DELETE ACCOUNT" style={{fontFamily:'monospace'}}/>
+                <Btn onClick={doDelete} disabled={!confirmed||busy}
+                  style={{fontSize:'12px',padding:'7px 14px',flexShrink:0,background:confirmed&&!busy?'#8B2020':'#160E08',color:confirmed&&!busy?'#F0E6D3':'#94816A'}}>{busy?'Deleting...':'Delete'}</Btn>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function SettingsView({ onClose, onDangerOp, onUpdateScale, user, onRename, onSignOut, onDeleteAccount, onExport }) {
       const scale = useRatingScale();
       const [editScale, setEditScale] = useState(scale.map(([v,l])=>({v:String(v),l})));
       const [active,  setActive]  = useState(null);
@@ -1754,19 +1886,21 @@
             <button onClick={onClose} style={{background:'none',border:'none',color:'#C8922A',fontSize:'18px',cursor:'pointer',padding:'0 4px',lineHeight:1}}>←</button>
             <div>
               <h1 style={{fontFamily:"'Playfair Display', serif",fontSize:'20px',fontWeight:'700',color:'#F0E6D3'}}>Cellar Management</h1>
-              <p style={{color:'#7A5840',fontSize:'11px',marginTop:'2px'}}>Bulk operations on your data — read carefully</p>
+              <p style={{color:'#A3886E',fontSize:'11px',marginTop:'2px'}}>Bulk operations on your data — read carefully</p>
             </div>
           </div>
           <div style={{padding:'16px 18px',maxWidth:'580px'}}>
+
+            <AccountBox user={user} onRename={onRename} onSignOut={onSignOut} onDelete={onDeleteAccount} onExport={onExport}/>
 
             {/* Rating Scale Editor */}
             <div style={{marginBottom:'28px'}}>
               <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'10px'}}>
                 <div>
                   <div style={{fontSize:'13px',fontWeight:'600',color:'#C0A890'}}>Personal Rating Scale</div>
-                  <div style={{fontSize:'11px',color:'#5A4030',marginTop:'2px'}}>Quick-select chips when rating a drink — your own benchmarks</div>
+                  <div style={{fontSize:'11px',color:'#9C856E',marginTop:'2px'}}>Quick-select chips when rating a drink — your own benchmarks</div>
                 </div>
-                <button onClick={resetScale} style={{background:'none',border:'1px solid #2A1E16',color:'#5A4030',fontSize:'11px',padding:'4px 10px',borderRadius:'5px',cursor:'pointer'}}>Reset</button>
+                <button onClick={resetScale} style={{background:'none',border:'1px solid #2A1E16',color:'#9C856E',fontSize:'11px',padding:'4px 10px',borderRadius:'5px',cursor:'pointer'}}>Reset</button>
               </div>
               {editScale.map((chip,i)=>(
                 <div key={i} style={{display:'flex',gap:'6px',alignItems:'center',marginBottom:'6px'}}>
@@ -1774,13 +1908,13 @@
                     style={{width:'52px',fontSize:'12px',padding:'6px 8px',textAlign:'center'}} placeholder="pts"/>
                   <input type="text" value={chip.l} onChange={e=>updateChip(i,'l',e.target.value)}
                     style={{flex:1,fontSize:'12px',padding:'6px 8px'}} placeholder="Label"/>
-                  <button onClick={()=>removeChip(i)} style={{background:'none',border:'none',color:'#3A2818',fontSize:'16px',cursor:'pointer',padding:'0 4px',lineHeight:1}}>×</button>
+                  <button onClick={()=>removeChip(i)} style={{background:'none',border:'none',color:'#94816A',fontSize:'16px',cursor:'pointer',padding:'0 4px',lineHeight:1}}>×</button>
                 </div>
               ))}
-              <button onClick={addChip} style={{marginTop:'4px',background:'none',border:'1px dashed #2A1E16',color:'#5A4030',fontSize:'11px',padding:'6px 14px',borderRadius:'5px',width:'100%',cursor:'pointer'}}>+ Add chip</button>
+              <button onClick={addChip} style={{marginTop:'4px',background:'none',border:'1px dashed #2A1E16',color:'#9C856E',fontSize:'11px',padding:'6px 14px',borderRadius:'5px',width:'100%',cursor:'pointer'}}>+ Add chip</button>
             </div>
 
-            <div style={{background:'#1A0E08',border:'1px solid #C8602A44',borderRadius:'8px',padding:'12px 14px',marginBottom:'20px',fontSize:'12px',color:'#8A6040',lineHeight:'1.5'}}>
+            <div style={{background:'#1A0E08',border:'1px solid #C8602A44',borderRadius:'8px',padding:'12px 14px',marginBottom:'20px',fontSize:'12px',color:'#AA896B',lineHeight:'1.5'}}>
               ⚠ These operations cannot be undone. Each one requires you to type a confirmation phrase before it can run. Take a moment to read what each one does.
             </div>
             {DANGER_OPS.map(o => (
@@ -1789,16 +1923,16 @@
                   style={{width:'100%',display:'flex',alignItems:'center',gap:'12px',padding:'13px 16px',background:active===o.id?'#160E08':'#0F0906',border:'none',cursor:'pointer',textAlign:'left'}}>
                   <span style={{fontSize:'20px',flexShrink:0}}>{o.icon}</span>
                   <div style={{flex:1}}>
-                    <div style={{fontSize:'13px',fontWeight:'600',color: active===o.id ? o.color : '#C0A890'}}>{o.title}</div>
-                    <div style={{fontSize:'11px',color:'#5A4030',marginTop:'1px'}}>{o.sub}</div>
+                    <div style={{fontSize:'13px',fontWeight:'600',color: active===o.id ? DANGER_TEXT[o.id][0] : '#C0A890'}}>{o.title}</div>
+                    <div style={{fontSize:'11px',color:'#9C856E',marginTop:'1px'}}>{o.sub}</div>
                   </div>
-                  <span style={{color:'#3A2818',fontSize:'16px'}}>{active===o.id?'▲':'▶'}</span>
+                  <span style={{color:'#94816A',fontSize:'16px'}}>{active===o.id?'▲':'▶'}</span>
                 </button>
                 {active===o.id && (
                   <div style={{padding:'14px 16px',background:'#0A0604',borderTop:`1px solid ${o.color}33`}}>
-                    <p style={{fontSize:'12px',color:'#8A7060',lineHeight:'1.6',marginBottom:'16px'}}>{o.desc}</p>
-                    <div style={{fontSize:'12px',color:'#6A5040',marginBottom:'8px'}}>
-                      Type <strong style={{color:o.color,fontFamily:'monospace'}}>{o.phrase}</strong> to confirm:
+                    <p style={{fontSize:'12px',color:'#A68E7A',lineHeight:'1.6',marginBottom:'16px'}}>{o.desc}</p>
+                    <div style={{fontSize:'12px',color:'#9E8771',marginBottom:'8px'}}>
+                      Type <strong style={{color:DANGER_TEXT[o.id][0],fontFamily:'monospace'}}>{o.phrase}</strong> to confirm:
                     </div>
                     <div style={{display:'flex',gap:'8px',flexWrap:'wrap',alignItems:'center'}}>
                       <input value={input} onChange={e=>setInput(e.target.value)}
@@ -1806,7 +1940,7 @@
                         style={{flex:1,minWidth:'140px',fontFamily:'monospace',fontSize:'13px',letterSpacing:'.05em',borderColor:confirmed?o.color:'#2A1E16'}}/>
                       <Btn onClick={cancel} style={{fontSize:'12px',padding:'7px 14px'}}>Cancel</Btn>
                       <Btn onClick={execute} disabled={!confirmed}
-                        style={{fontSize:'12px',padding:'7px 14px',background:confirmed?o.color:'#160E08',color:confirmed?'#0C0806':'#3A2818',border:`1px solid ${confirmed?o.color:'#2A1E16'}`,cursor:confirmed?'pointer':'not-allowed',fontWeight:confirmed?'700':'400'}}>
+                        style={{fontSize:'12px',padding:'7px 14px',background:confirmed?o.color:'#160E08',color:confirmed?DANGER_TEXT[o.id][1]:'#94816A',border:`1px solid ${confirmed?o.color:'#2A1E16'}`,cursor:confirmed?'pointer':'not-allowed',fontWeight:confirmed?'700':'400'}}>
                         {o.btnLabel}
                       </Btn>
                     </div>
@@ -1833,8 +1967,16 @@
     }
 
     // ─── App ───────────────────────────────────────────────────────────────
-    function App() {
+    function App({ user, onSignOut, onUserChange }) {
       const [drinks,    setDrinks]    = useState([]);
+      // `drinksRef` is always the newest list (updated at once, not at the next render), so queued saves start from the latest copy.
+      const drinksRef = useRef([]);
+      const saveChain = useRef(Promise.resolve());
+      const pendingScale = useRef(null);
+      const flushRef = useRef(() => {});
+      function setDrinksNow(u) { const next = typeof u === 'function' ? u(drinksRef.current) : u; drinksRef.current = next; setDrinks(next); }
+      // One save at a time: a task starts only when the one before it has finished (whether it worked or not).
+      function enqueue(task) { const run = saveChain.current.then(task, task); saveChain.current = run.catch(() => {}); return run; }
       const [locations, setLocations] = useState(DEFAULT_LOCATIONS);
       const [scale,     setScale]     = useState(DEFAULT_SCALE);
       const [view,      setView]      = useState('cellar');
@@ -1842,60 +1984,93 @@
       const [selected,  setSelected]  = useState(null);
       const [loading,   setLoading]   = useState(true);
       const [appError,  setAppError]  = useState(null);
+      const [loadFailed, setLoadFailed] = useState(null);
+      const conflictId = useRef(null);
+      const settingsVer   = useRef(0);
+      const settingsChain = useRef(Promise.resolve());
+      const scaleTimer    = useRef(null);
 
-      useEffect(() => {
-        (async () => {
-          const data = await store.load();
-          if (data === null) {
-            await store.upsertMany(SAMPLE_DRINKS);
-            setDrinks(SAMPLE_DRINKS);
-          } else {
-            setDrinks(data);
-          }
-          const ld = locStore.load();
-          if (ld) {
-            // Always merge system locations in fresh from defaults — they can't
-            // be user-edited and may have been added after the user's data was saved.
-            const systemLocs = DEFAULT_LOCATIONS.filter(l => l.system);
-            setLocations([...ld.filter(l => !l.system), ...systemLocs]);
-          }
-          const sd = scaleStore.load();
-          if (sd) setScale(sd);
-          setLoading(false);
-        })();
-      }, []);
-
-      async function saveDrink(drink) {
-        try {
-          await store.upsert(drink);
-          setDrinks(prev => prev.find(d=>d.id===drink.id) ? prev.map(d=>d.id===drink.id?drink:d) : [...prev, drink]);
+      function applyCellar({ drinks, settings }) {
+        setDrinksNow(drinks);
+        settingsVer.current = settings.version;
+        // System locations always come fresh from defaults — they can't be user-edited.
+        const systemLocs = DEFAULT_LOCATIONS.filter(l => l.system);
+        setLocations(settings.locations ? [...settings.locations.filter(l => !l.system), ...systemLocs] : DEFAULT_LOCATIONS);
+        setScale(settings.scale || DEFAULT_SCALE);
+      }
+      async function reload() {
+        try { applyCellar(await store.load()); setSelected(null); }
+        catch (e) { setAppError(e.message || 'Could not load your cellar.'); }
+      }
+      // 409 = this item was changed elsewhere (another tab or device): reload so the next try is current.
+      async function fail(e, fallback) {
+        if (e instanceof ApiError && e.status === 409) {
+          setAppError('This was changed on another device or tab. Your cellar has been reloaded, please try again.');
           setEditing(null); setView('cellar');
-        } catch(e) { setAppError('Failed to save drink. Check your connection and try again.'); }
+          await reload();
+        } else setAppError(e instanceof ApiError && (e.code === 'network' || ERROR_TEXT[e.code]) ? e.message : fallback);
       }
-      async function removeDrink(id) {
+
+      async function openCellar() {
+        setLoading(true); setLoadFailed(null);
+        try { applyCellar(await store.load()); }
+        catch (e) { setLoadFailed(e.message || 'Could not load your cellar.'); }
+        setLoading(false);
+      }
+      useEffect(() => { openCellar(); }, []);
+
+      // Saves one drink and puts the server's new version on it. Returns the saved drink or null.
+      // keepForm: the save comes from the Add/Edit form. On a 409 the form stays open with what was typed; the cellar is reloaded, and
+      // pressing Save again then replaces the other change (the held copy is newer, so its version is used) while Cancel keeps it.
+      async function persistNow(updated, keepForm) {
+        // Only this tab's own earlier save (a double click), or the reload after a 409 on the form, can make the held copy newer than the form's copy.
+        const cur = drinksRef.current.find(d => d.id === updated.id);
+        let toSave = cur && cur._v != null && cur._v > (updated._v ?? 0) ? { ...updated, _v: cur._v } : updated;
+        if (!cur && conflictId.current === updated.id) toSave = { ...updated, _v: null };   // deleted elsewhere: Save adds it again
         try {
-          await store.remove(id);
-          setDrinks(prev => prev.filter(d=>d.id!==id));
-          setSelected(null);
-        } catch(e) { setAppError('Failed to delete drink. Check your connection and try again.'); }
+          const saved = await store.upsert(toSave);
+          setDrinksNow(prev => prev.some(d => d.id === saved.id) ? prev.map(d => d.id === saved.id ? saved : d) : [...prev, saved]);
+          if (conflictId.current === saved.id) { conflictId.current = null; setAppError(m => (m && m.indexOf('This drink was changed') === 0 ? null : m)); }
+          return saved;
+        } catch (e) {
+          if (keepForm && e instanceof ApiError && e.status === 409) {
+            conflictId.current = updated.id;
+            await reload();
+            setAppError('This drink was changed on another device or tab. Your changes are still in the form. Press Save again to replace the other change with yours, or Cancel to keep the other change.');
+            return null;
+          }
+          await fail(e, 'Failed to save. Check your connection and try again.'); return null;
+        }
       }
+      const persistDrink = (updated, keepForm) => enqueue(() => persistNow(updated, keepForm));
+      // Changes one drink from its LATEST copy (so two quick changes both land); `make` returns the new drink or null for nothing to do.
+      const changeDrink = (drinkId, make) => enqueue(async () => {
+        const drink = drinksRef.current.find(d => d.id === drinkId);
+        const updated = drink && make(drink);
+        return updated ? persistNow(updated) : null;
+      });
+      async function saveDrink(drink) {
+        const saved = await persistDrink(drink, true);
+        if (saved) { setEditing(null); setView('cellar'); }
+      }
+      const removeDrink = id => enqueue(async () => {
+        const d = drinksRef.current.find(x => x.id === id);
+        try {
+          await store.remove(d || { id });
+          setDrinksNow(prev => prev.filter(x => x.id !== id));
+          setSelected(null);
+        } catch (e) { await fail(e, 'Failed to delete drink. Check your connection and try again.'); }
+      });
 
       // Stock operations — update the drink's stock[] array
       async function addStock(drinkId, entry) {
-        const drink = drinks.find(d=>d.id===drinkId);
-        if (!drink) return;
-        const updated = {...drink, stock:[...(drink.stock||[]), entry]};
-        try {
-          await store.upsert(updated);
-          setDrinks(prev => prev.map(d=>d.id===drinkId?updated:d));
-          setSelected(updated);
-        } catch(e) { setAppError('Failed to save. Check your connection.'); }
+        const saved = await changeDrink(drinkId, drink => ({...drink, stock:[...(drink.stock||[]), entry]}));
+        if (saved) setSelected(saved);
       }
       async function finishStock(drinkId, stockId, qty) {
-        const drink = drinks.find(d=>d.id===drinkId);
-        if (!drink) return;
+        const saved = await changeDrink(drinkId, drink => {
         const entry = (drink.stock||[]).find(s=>s.id===stockId);
-        if (!entry) return;
+        if (!entry) return null;
         const finishQty = Math.min(qty||entry.quantity, entry.quantity);
         let newStock;
         if (finishQty >= entry.quantity) {
@@ -1910,27 +2085,21 @@
               status:'finished', dateFinished:today() },
           ];
         }
-        const updated = {...drink, stock:newStock};
-        await store.upsert(updated);
-        setDrinks(prev => prev.map(d=>d.id===drinkId?updated:d));
-        setSelected(updated);
+        return {...drink, stock:newStock};
+        });
+        if (saved) setSelected(saved);
       }
       async function removeStock(drinkId, stockId) {
-        const drink = drinks.find(d=>d.id===drinkId);
-        if (!drink) return;
-        const updated = {...drink, stock:(drink.stock||[]).filter(s=>s.id!==stockId)};
-        await store.upsert(updated);
-        setDrinks(prev => prev.map(d=>d.id===drinkId?updated:d));
-        setSelected(updated);
+        const saved = await changeDrink(drinkId, drink => ({...drink, stock:(drink.stock||[]).filter(s=>s.id!==stockId)}));
+        if (saved) setSelected(saved);
       }
       // Move: supports partial quantity.
       // Moving all  → updates entry in-place (removes from Unassigned correctly).
       // Moving some → reduces source qty, creates new entry at destination.
       async function moveStock(drinkId, stockId, qty, patch) {
-        const drink = drinks.find(d=>d.id===drinkId);
-        if (!drink) return;
+        const saved = await changeDrink(drinkId, drink => {
         const entry = (drink.stock||[]).find(s=>s.id===stockId);
-        if (!entry) return;
+        if (!entry) return null;
         const moveQty = Math.min(qty||entry.quantity, entry.quantity);
         let newStock;
         if (moveQty >= entry.quantity) {
@@ -1944,49 +2113,92 @@
               dateAdded:today(), status:'in_stock', dateFinished:null },
           ];
         }
-        const updated = {...drink, stock:newStock};
-        await store.upsert(updated);
-        setDrinks(prev => prev.map(d=>d.id===drinkId?updated:d));
-        setSelected(updated);
+        return {...drink, stock:newStock};
+        });
+        if (saved) setSelected(saved);
       }
 
-      function updateLocations(nl) { setLocations(nl); locStore.save(nl); }
-      function updateScale(ns) { setScale(ns); scaleStore.save(ns); }
+      // Settings saves go through one queue so each uses the version the last one returned.
+      // A network error or a 5xx is retried after 5, 15 and 60 seconds (the screen already shows the change, so say it is not saved yet);
+      // a 4xx (including a 409) is never retried.
+      function saveSettings(patch, opts) {
+        settingsChain.current = settingsChain.current.then(async () => {
+          const waits = [5000, 15000, 60000];
+          for (let attempt = 0; ; attempt++) {
+            try {
+              settingsVer.current = await store.saveSettings(patch, settingsVer.current, opts);
+              setAppError(m => (m && m.indexOf('Settings are not saved yet') === 0 ? null : m));
+              return;
+            } catch (e) {
+              const retryable = e instanceof ApiError && (e.status === 0 || e.status >= 500);
+              if (!retryable || (opts && opts.keepalive)) { await fail(e, 'Failed to save settings. Check your connection.'); return; }
+              if (attempt >= waits.length) { setAppError('Settings were not saved. Check your connection and make the change again.'); return; }
+              setAppError('Settings are not saved yet. Trying again...');
+              await new Promise(r => setTimeout(r, waits[attempt]));
+            }
+          }
+        });
+        return settingsChain.current;
+      }
+      function updateLocations(nl) { setLocations(nl); saveSettings({ locations: nl.filter(l => !l.system) }); }
+      function updateScale(ns) {
+        setScale(ns);
+        clearTimeout(scaleTimer.current);
+        pendingScale.current = ns;
+        scaleTimer.current = setTimeout(() => { pendingScale.current = null; saveSettings({ scale: ns }); }, 700);   // typing in the chips saves once, not per keystroke
+      }
+      // A scale edit still waiting for its timer is saved at once when the page is hidden or closed.
+      flushRef.current = () => {
+        if (pendingScale.current) { const ns = pendingScale.current; pendingScale.current = null; clearTimeout(scaleTimer.current); saveSettings({ scale: ns }, { keepalive: true }); }
+      };
+      useEffect(() => {
+        const onHide = () => { if (document.visibilityState === 'hidden') flushRef.current(); };
+        const onGone = () => flushRef.current();
+        document.addEventListener('visibilitychange', onHide); window.addEventListener('pagehide', onGone);
+        return () => { document.removeEventListener('visibilitychange', onHide); window.removeEventListener('pagehide', onGone); };
+      }, []);
       // Batch-save multiple drinks (used when migrating orphaned stock to Unassigned)
-      async function saveDrinks(drinkList) {
-        await store.upsertMany(drinkList);
-        setDrinks(prev => {
-          const map = new Map(drinkList.map(d => [d.id, d]));
-          return prev.map(d => map.get(d.id) || d);
+      // Goes through the same queue as every other drink save, and uses the newest version of each drink this tab holds.
+      function saveDrinks(drinkList) {
+        return enqueue(async () => {
+          try {
+            const list = drinkList.map(d => { const cur = drinksRef.current.find(x => x.id === d.id); return cur && cur._v != null && cur._v > (d._v ?? 0) ? { ...d, _v: cur._v } : d; });
+            const saved = await store.upsertMany(list);
+            const map = new Map(saved.map(d => [d.id, d]));
+            setDrinksNow(prev => prev.map(d => map.get(d.id) || d));
+          } catch (e) { await fail(e, 'Failed to move bottles. Check your connection.'); throw e; }
         });
       }
+      // The bulk operations run on the server in one atomic step; then we reload.
       async function handleDangerOp(id) {
         try {
-          // Only Unassigned (system location) survives a wipe
-          const systemOnly = DEFAULT_LOCATIONS.filter(l => l.system);
-          if (id === 'unassign') {
-            const updated = drinks.map(d => ({...d, stock:(d.stock||[]).map(s => s.status==='in_stock' ? {...s,location:'unassigned',sublocation:'',position:null} : s)}));
-            await store.upsertMany(updated); setDrinks(updated);
-          } else if (id === 'clearstock') {
-            const updated = drinks.map(d => ({...d, stock:(d.stock||[]).filter(s => s.status!=='in_stock')}));
-            await store.upsertMany(updated); setDrinks(updated);
-          } else if (id === 'clearall') {
-            const updated = drinks.map(d => ({...d, stock:(d.stock||[]).filter(s => s.status!=='in_stock')}));
-            await store.upsertMany(updated); setDrinks(updated);
-            setLocations(systemOnly); locStore.save(systemOnly);
-          } else if (id === 'deletedrinks') {
-            await store.removeAll(drinks.map(d => d.id)); setDrinks([]);
-          } else if (id === 'factory') {
-            await store.removeAll(drinks.map(d => d.id)); setDrinks([]);
-            setLocations(systemOnly); locStore.save(systemOnly);
-          } else if (id === 'demo') {
-            await store.removeAll(drinks.map(d => d.id));
-            await store.upsertMany(SAMPLE_DRINKS);
-            setDrinks(SAMPLE_DRINKS);
-            setLocations(DEFAULT_LOCATIONS); locStore.save(DEFAULT_LOCATIONS);
-          }
+          if      (id === 'unassign')     await store.op('unassign');
+          else if (id === 'clearstock')   await store.op('clearstock');
+          else if (id === 'clearall')     await store.op('clearstock', { locations: [] });
+          else if (id === 'deletedrinks') await store.op('delete-drinks');
+          else if (id === 'factory')      await store.op('delete-drinks', { locations: [] });
+          else if (id === 'demo')         await store.op('replace-all', { drinks: SAMPLE_DRINKS.map(toApiDrink), locations: DEFAULT_LOCATIONS.filter(l => !l.system) });
+          await reload();
           setView('cellar');
-        } catch(e) { setAppError('Operation failed. Please try again.'); }
+        } catch(e) { await fail(e, 'Operation failed. Please try again.'); }
+      }
+      async function renameUser(name) {
+        try { const r = await api('PATCH', '/me', { name, version: user.version }); onUserChange(r.user); }
+        catch (e) { throw new Error(e.status === 409 ? 'Your profile changed elsewhere. Sign in again.' : (e.message || 'Could not save')); }
+      }
+      // Downloads everything in the same shape scripts/import-local.mjs reads (drinks with prices in dollars, locations, rating scale).
+      async function exportData() {
+        const r = await api('GET', '/cellar');
+        const data = { app: 'My Cellar', exportedAt: new Date().toISOString(),
+          drinks: r.drinks.map(fromApiDrink).map(({ _v, ...d }) => d),
+          locations: (r.settings.locations || []), scale: r.settings.scale || null };
+        const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+        const a = document.createElement('a'); a.href = url; a.download = 'my-cellar-' + today() + '.json';
+        document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+      async function deleteAccount() {
+        try { await api('DELETE', '/me'); session.clear(); window.location.reload(); }
+        catch (e) { setAppError('Could not delete the account. Try again.'); }
       }
       function navTo(v)     { setView(v); setSelected(null); setEditing(null); }
       function startAdd()   { setEditing(null); setView('add'); setSelected(null); }
@@ -2008,20 +2220,32 @@
         </div>
       );
 
+      if (loadFailed) return (
+        <div style={{display:'flex',height:'100%',alignItems:'center',justifyContent:'center',background:'#0C0806',padding:'24px'}}>
+          <div style={{maxWidth:'340px',width:'100%',textAlign:'center'}}>
+            <div style={{fontFamily:"'Playfair Display', serif",fontSize:'20px',color:'#C8922A',marginBottom:'10px'}}>Could not open your cellar</div>
+            <p style={{color:'#A68E7A',fontSize:'13px',lineHeight:'1.6',marginBottom:'18px'}}>{loadFailed} Your data is safe; it just could not be loaded.</p>
+            <div style={{display:'flex',gap:'10px',justifyContent:'center'}}>
+              <Btn onClick={openCellar} variant="primary" style={{padding:'9px 20px',fontSize:'13px'}}>Try again</Btn>
+              <Btn onClick={onSignOut} style={{padding:'9px 20px',fontSize:'13px'}}>Sign out</Btn>
+            </div>
+          </div>
+        </div>
+      );
       const sp = { drinks, selected, occupiedPositions, onSelect:setSelected, onEdit:startEdit, onDelete:removeDrink, onAddStock:addStock, onFinishStock:finishStock, onRemoveStock:removeStock, onMoveStock:moveStock };
 
       return (<ScaleCtx.Provider value={scale}><LocCtx.Provider value={locations}>
         <div style={{display:'flex',flexDirection:'column',height:'100%',background:'#0C0806',color:'#F0E6D3',overflow:'hidden'}}>
           <MobileHeader drinkCount={cellarDrinks.length} totalBottles={cellarDrinks.reduce((s,d)=>s+inStockEntries(d).reduce((ss,e)=>ss+e.quantity,0),0)} onNav={navTo}/>
           <div style={{display:'flex',flex:1,overflow:'hidden'}}>
-            <Sidebar view={view} onNav={navTo} onAdd={startAdd} drinks={drinks}/>
+            <Sidebar view={view} onNav={navTo} onAdd={startAdd} drinks={drinks} user={user}/>
             <main style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
               {view==='cellar'    && <CellarView   {...sp}/>}
               {view==='map'       && <MapView      {...sp} onManageLocations={()=>setView('locations')}/>}
               {view==='tastings'  && <TastingsView drinks={drinks} onEdit={startEdit} onSelect={d=>{setSelected(d);setView('cellar');}}/>}
               {view==='locations' && <ManageLocationsView onClose={()=>setView('map')} drinks={drinks} onUpdateLocations={updateLocations} onSaveDrinks={saveDrinks}/>}
               {view==='add'       && <AddEditView  drink={editing} onSave={saveDrink} onCancel={()=>{setEditing(null);navTo('cellar');}}/>}
-              {view==='settings'  && <SettingsView onClose={()=>navTo('cellar')} onDangerOp={handleDangerOp} onUpdateScale={updateScale}/>}
+              {view==='settings'  && <SettingsView onClose={()=>navTo('cellar')} onDangerOp={handleDangerOp} onUpdateScale={updateScale} user={user} onRename={renameUser} onSignOut={onSignOut} onDeleteAccount={deleteAccount} onExport={exportData}/>}
             </main>
           </div>
           <BottomNav view={view} onNav={navTo} onAdd={startAdd}/>
@@ -2044,17 +2268,89 @@
       }
     }
 
-    ReactDOM.createRoot(document.getElementById('root')).render(<ErrorBoundary><App/></ErrorBoundary>);
+    // ─── Sign-in ──────────────────────────────────────────────────────────
+    const SIGNIN_ERRORS = {
+      not_invited: "That email address hasn't been invited to this cellar.",
+      email_not_verified: 'Google reports that email address as not verified.',
+      account_already_linked: 'That email is already linked to a different account.',
+      token_expired: 'Sign-in took too long. Please try again.',
+      origin_not_allowed: 'This page is not allowed to use the sign-in service.',
+      invalid_token: 'Sign-in could not be checked. Please try again.',
+      provider_not_configured: 'Sign-in is not available yet.',
+    };
+    function LoginScreen({ onSignedIn, notice }) {
+      const [err, setErr]   = useState(null);
+      const [busy, setBusy] = useState(false);
+      const btnRef = useRef(null);
+      async function exchange(path, idToken, nonce) {
+        setBusy(true); setErr(null);
+        try { onSignedIn(await api('POST', path, nonce ? { idToken, nonce } : { idToken })); }
+        catch (e) { setErr(SIGNIN_ERRORS[e.code] || e.message || 'Sign-in failed.'); setBusy(false); }
+      }
+      useEffect(() => {
+        if (!GOOGLE_CLIENT_ID) return;
+        let tries = 0;
+        const t = setInterval(() => {
+          if (window.google && window.google.accounts && window.google.accounts.id) {
+            clearInterval(t);
+            window.google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: r => exchange('/auth/google', r.credential) });
+            if (btnRef.current) window.google.accounts.id.renderButton(btnRef.current, { theme: 'filled_black', size: 'large', shape: 'pill', text: 'signin_with', width: 260 });
+          } else if (++tries > 100) { clearInterval(t); setErr('Google sign-in could not load. An ad blocker or a network filter may be blocking it. Try another browser or network.'); }
+        }, 100);
+        return () => clearInterval(t);
+      }, []);
+      // Microsoft (personal accounts) returns an id_token in the URL fragment.
+      useEffect(() => {
+        if (!MS_CLIENT_ID || !window.location.hash.includes('id_token=')) return;
+        const p = new URLSearchParams(window.location.hash.slice(1));
+        const tok = p.get('id_token');
+        let nonce = null; try { nonce = sessionStorage.getItem('mycellar-ms-nonce'); } catch {}
+        window.history.replaceState(null, '', window.location.pathname + window.location.search);
+        try {
+          const claims = JSON.parse(atob(tok.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+          if (!nonce || claims.nonce !== nonce || p.get('state') !== nonce) { setErr('Sign-in could not be verified. Please try again.'); return; }
+        } catch { setErr('Sign-in failed.'); return; }
+        exchange('/auth/microsoft', tok, nonce);
+      }, []);
+      function startMicrosoft() {
+        const nonce = uid() + uid();
+        try { sessionStorage.setItem('mycellar-ms-nonce', nonce); } catch {}
+        window.location.href = 'https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize?' + new URLSearchParams({
+          client_id: MS_CLIENT_ID, response_type: 'id_token', redirect_uri: window.location.origin + window.location.pathname,
+          response_mode: 'fragment', scope: 'openid profile email', nonce, state: nonce });
+      }
+      return (
+        <div style={{display:'flex',height:'100%',alignItems:'center',justifyContent:'center',background:'#0C0806',padding:'24px'}}>
+          <div style={{maxWidth:'340px',width:'100%',textAlign:'center'}}>
+            <div style={{fontSize:'44px',marginBottom:'8px'}}>🍾</div>
+            <h1 style={{fontFamily:"'Playfair Display', serif",fontSize:'30px',fontWeight:'700',color:'#F0E6D3'}}>My Cellar</h1>
+            <p style={{color:'#A3886E',fontSize:'13px',margin:'8px 0 28px',lineHeight:'1.6'}}>Sign in to open your cellar.</p>
+            {busy && <div style={{color:'#C8922A',fontSize:'13px',marginBottom:'16px'}}>Signing you in…</div>}
+            <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:'12px',opacity:busy?0.4:1,pointerEvents:busy?'none':'auto'}}>
+              {GOOGLE_CLIENT_ID && <div ref={btnRef}/>}
+              {MS_CLIENT_ID && <Btn onClick={startMicrosoft} style={{width:'260px',padding:'10px 16px',borderRadius:'20px'}}>Sign in with Microsoft</Btn>}
+              {!GOOGLE_CLIENT_ID && !MS_CLIENT_ID && <div style={{color:'#AA896B',fontSize:'12px'}}>Sign-in is not set up yet.</div>}
+            </div>
+            {(err || notice) && <div style={{marginTop:'20px',background:'#2A0808',border:'1px solid #8B2020',color:'#E88080',padding:'10px 14px',borderRadius:'8px',fontSize:'12px',lineHeight:'1.5'}}>{err || notice}</div>}
+          </div>
+        </div>
+      );
+    }
+
+    function Root() {
+      const [sess, setSess] = useState(() => session.get());
+      const [ended, setEnded] = useState(false);
+      useEffect(() => { onUnauthorized = () => { session.clear(); setSess(null); setEnded(true); }; }, []);
+      // The sign-in reply carries no profile version, so fetch it once for the rename stale-edit check.
+      useEffect(() => { if (sess && sess.user.version == null) api('GET', '/me').then(r => userChanged(r.user)).catch(() => {}); }, [sess && sess.token]);
+      function signedIn(r) { session.set({ token: r.token, user: r.user }); setEnded(false); setSess(session.get()); }
+      async function signOut() { try { await api('POST', '/me/logout', {}); } catch {} session.clear(); setSess(null); }
+      function userChanged(u) { const s = { ...sess, user: u }; session.set(s); setSess(s); }
+      if (!sess) return <LoginScreen onSignedIn={signedIn} notice={ended ? ERROR_TEXT.unauthorized + ' Anything not saved before that was not kept.' : null}/>;
+      return <App key={sess.user.id} user={sess.user} onSignOut={signOut} onUserChange={userChanged}/>;
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<ErrorBoundary><Root/></ErrorBoundary>);
   </script>
-  <!--
-  SUPABASE SETUP
-  1. Uncomment <script src="...supabase..."> in <head>
-  2. Fill in SUPABASE_URL and SUPABASE_ANON_KEY above
-  3. Run in Supabase SQL Editor:
-     create table cellar_drinks (id text primary key, data jsonb not null, created_at timestamptz default now());
-     alter table cellar_drinks enable row level security;
-     create policy "allow all" on cellar_drinks for all using (true);
-  Locations are localStorage-only (physical config, one place).
-  -->
 </body>
 </html>

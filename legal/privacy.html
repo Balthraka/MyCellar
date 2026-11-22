@@ -12,7 +12,7 @@
 <ul>
 <li><strong>From Google sign-in:</strong> your name, your email address and a unique account identifier. MyCellar asks for nothing else from your Google account.</li>
 <li><strong>What you enter:</strong> your drinks and their details, tasting notes, ratings, prices, bottle counts, storage locations and your settings.</li>
-<li><strong>A sign-in token:</strong> after you sign in, a random token is saved in your browser so you stay signed in. It expires after 30 days or when you sign out. The server keeps only a scrambled (hashed) copy of it.</li>
+<li><strong>A sign-in token:</strong> after you sign in, a random token is saved in your browser so you stay signed in. It expires after 7 days or when you sign out. The server keeps only a scrambled (hashed) copy of it.</li>
 </ul>
 
 <h2>What MyCellar does not do</h2>
@@ -23,6 +23,9 @@
 <li>It does not send you email.</li>
 </ul>
 
+<h2>Look up details</h2>
+<p>The app has an optional <strong>Look up details</strong> button. When you press it, the drink's type, name and producer are sent to an artificial-intelligence service run by Cloudflare (Workers AI) to suggest facts such as region and grape. The text sent and the answer are not kept. MyCellar stores only a daily count of how many look-ups you have used, which is limited to 20 a day, and removes old counts. Nothing else from your cellar is sent.</p>
+
 <h2>How the information is used</h2>
 <p>Your name and email identify your account. Your cellar is stored so it is there when you sign in on another device. Nothing is used for any other purpose.</p>
 
@@ -30,6 +33,7 @@
 <ul>
 <li>Your account and cellar are stored in a database hosted by Cloudflare. The app itself is served from GitHub Pages.</li>
 <li>Google processes your sign-in under its own privacy policy.</li>
+<li>Cloudflare also runs the AI service used by Look up details, as described above.</li>
 <li>To display the app, your browser loads code libraries from jsDelivr and fonts from Google Fonts. Like any website, those services can see your IP address when your browser asks them for these files. MyCellar does not send them anything about you or your cellar.</li>
 </ul>
 
