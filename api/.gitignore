@@ -1,0 +1,18 @@
+node_modules/
+.wrangler/
+.dev.vars
+# real data and generated SQL never go in git (schema.sql is the one exception)
+import/
+*.sql
+!schema.sql
+export*.json
+mycellar-backup*
+*.csv
+exports/
+import-out/
+Backups/
+backups/
+vendor/
+out/
+*.sqlite
+*.db
