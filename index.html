@@ -1366,6 +1366,11 @@
       const [state, setState] = useState({ phase:'idle', text:'' });
       const can = String(form.name||'').trim().length > 1 && state.phase !== 'busy';
       async function run() {
+        const keys = form.type === 'wine' ? ['wineColor','grape','region','appellation'] : ['whiskyStyle','whiskyRegion'];
+        if (!keys.some(k => !form[k] || (isNew && (k === 'wineColor' || k === 'whiskyStyle') && form[k] === EMPTY_FORM[k]))) {
+          setState({ phase:'done', text:'Nothing to look up: those fields are already filled in.' });
+          return;
+        }
         setState({ phase:'busy', text:'' });
         try {
           const r = await api('POST', '/lookup', { type: form.type, name: String(form.name).trim(), producer: String(form.producer||'').trim() });
